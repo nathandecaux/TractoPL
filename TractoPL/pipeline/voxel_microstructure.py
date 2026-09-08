@@ -29,7 +29,7 @@ def init_pipeline(subject, pipeline, **kwargs):
     )
     return True
 
-def get_DTI_metrics(subject, bundle_seg_pipeline='bundle_seg_nonrigid', dti_pipeline='preprocessing', **kwargs):
+def get_DTI_metrics(subject, bundle_seg_pipeline='bundle_seg', dti_pipeline='preprocessing', **kwargs):
     """
     Docstring pour get_DTI_metrics
     
@@ -69,7 +69,7 @@ def get_DTI_metrics(subject, bundle_seg_pipeline='bundle_seg_nonrigid', dti_pipe
     copy_from_dict(subject,res_dict, pipeline='DTI_analysis')
 
 
-def get_DTI_metrics_atlas(subject, bundle_seg_pipeline='bundle_seg_nonrigid', dti_pipeline='preprocessing', atlas_name='HCP', **kwargs):
+def get_DTI_metrics_atlas(subject, bundle_seg_pipeline='bundle_seg', dti_pipeline='preprocessing', atlas_name='HCP', **kwargs):
 
     dti_metrics = subject.get(pipeline=dti_pipeline, metric='*')
     bundle_masks=subject.get(pipeline=bundle_seg_pipeline, label='fibers',suffix='mask',datatype='atlasmap')
@@ -157,7 +157,7 @@ def process_single_subject(arg):
 from pprint import pprint
 
 if __name__ == "__main__":
-    pipeline = 'bundle_seg_nonrigid'
+    pipeline = 'bundle_seg'
     num_processes = 1
 
     if os.uname()[1] == 'calcarine':

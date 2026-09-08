@@ -84,7 +84,7 @@ def atlas_fiber_density(subject, pipeline, bundle='ALL', atlas_name='HCP', **kwa
     for b in bundle:
         print(f"Processing bundle {b} for subject {subject.sub_id}")
     # Load the segmented bundle in atlas space
-        bundle_tract = subject.get_unique(suffix='tracto', pipeline='bundle_seg_nonrigid', bundle=b, extension='trk', atlas=atlas_name)
+        bundle_tract = subject.get_unique(suffix='tracto', pipeline='bundle_seg', bundle=b, extension='trk', atlas=atlas_name)
 
         # Compute the fiber density
         density_map = get_fiber_density(bundle_tract, reference_image)
@@ -115,7 +115,7 @@ def subject_fiber_density(subject, pipeline, bundle='ALL', **kwargs):
     for b in bundle:
         print(f"Processing bundle {b} for subject {subject.sub_id}")
         # Load the segmented bundle in subject space
-        bundle_tract = subject.get_unique(suffix='tracto', pipeline='bundle_seg_nonrigid', bundle=b, extension='trk', datatype='tracto',atlas=None)
+        bundle_tract = subject.get_unique(suffix='tracto', pipeline='bundle_seg', bundle=b, extension='trk', datatype='tracto',atlas=None)
         # Compute the fiber density
         density_map = get_fiber_density(bundle_tract, reference_image)
         # Save the fiber density map

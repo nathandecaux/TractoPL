@@ -94,7 +94,8 @@ def save_vtk(streamlines, output_vtk_path,scalar_dict=None):
         The file path where the VTK file will be saved.
     scalar_dict : dict, optional
         A dictionary mapping scalar names (str) to scalar values. The scalar values can be:
-        - A numpy array of values for each point across all streamlines
+                - A numpy array of values for each point across all streamlines; a
+                    two-dimensional array is stored as a multi-component point array
         - A list of arrays that will be concatenated
         The values will be flattened and added as point data to the polydata.
         Default is None.
@@ -130,8 +131,11 @@ def save_vtk(streamlines, output_vtk_path,scalar_dict=None):
                     scalar_values = np.array(scalar_values)
             else:
                 scalar_values = np.asarray(scalar_values)
-            # Convert to float64 to ensure VTK compatibility
-            scalar_values = scalar_values.astype(np.float64).flatten()
+            scalar_values = np.atleast_1d(scalar_values)
+            if scalar_values.ndim > 2:
+                raise ValueError(
+                    f"Scalar array '{scalar_name}' must be one- or two-dimensional."
+                )
             vtk_array = numpy_to_vtk(scalar_values, deep=1)
             vtk_array.SetName(scalar_name)
             polydata.GetPointData().AddArray(vtk_array)

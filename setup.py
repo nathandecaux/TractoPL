@@ -10,6 +10,12 @@ setup(
     long_description_content_type='text/markdown',
     url='https://github.com/nathandecaux/TractoPL',
     packages=find_packages(),
+    entry_points={
+        'console_scripts': [
+            'tractopl-apply-trans-to-vtk=TractoPL.scripts.apply_trans_to_vtk:main',
+            'tractopl-convert-tractogram=TractoPL.scripts.convert_tractogram:main',
+        ],
+    },
     install_requires=[
         'pandas',
         'numpy',

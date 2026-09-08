@@ -17,6 +17,7 @@ import shutil
 from time import sleep
 import time
 import multiprocessing
+import argparse
 
 # Répertoire contenant les centroids HCP
 HCP_CENTROIDS_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_longcentral"
@@ -24,9 +25,24 @@ HCP_FULL_BUNDLE_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_New
 HCP_REFERENCE = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_anat.nii.gz"
 HCP_PARC="/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/radtract_parcellations"
 # pipeline='hcp_association_multiclusters_umapendpoints'
-pipeline='hcp_association_1mm'
+pipeline='tractometry'
 
 CLUSTERING='cortex'
+
+def parse_args(step=None):
+    parser = argparse.ArgumentParser(description="Tractometry pipeline")
+    if step is None:
+        parser.add_argument('step', choices=['association'], help='Processing step')
+    parser.add_argument('--model-ref', '-r', required=True, help='Path to the model reference image.')
+    parser.add_argument('--model-bundles', '-b', required=True, help='Path to the model bundles.')
+    parser.add_argument('--model-centroids', '-c', required=True, help='Path to the model centroids.')
+    parser.add_argument('--model-parcellations', '-p', help='Path to the model parcellations.')
+    parser.add_argument('--subject', '-s', help='Subject ID. Processes all subjects when omitted.')
+    parser.add_argument('--db-root', '-d', required=True, help='Path to the BIDS database root.')
+    parser.add_argument('--pipeline', default='tractometry', help='Output pipeline name.')
+    parser.add_argument('--n-pts', type=int, default=100, help='Number of points used for association.')
+    parser.add_argument('--n-proc', type=int, help='Number of subjects processed in parallel.')
+    return parser.parse_args()
 # def get_bundle_mapping():
 #     """
 #     Créer un mapping entre les noms de bundles et les fichiers centroids correspondants.
@@ -168,7 +184,7 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
         extension='nii.gz'
     )
 
-    pipeline=pipeline+'_'+mcm_pipeline+'_'+clustering_method
+    pipeline="tractometry"#pipeline+'_'+mcm_pipeline+'_'+clustering_method
 
     print(f"Trouvé {len(vtk_files)} fichiers VTK pour le sujet {subject.sub_id}")
     # vtk_files = [vtk_file for vtk_file in vtk_files if vtk_file.get_entities().get('bundle', '') == 'CC1']
@@ -180,11 +196,11 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
         if bundle_name in bundle_mapping:
             hcp_bundle_name = bundle_mapping[bundle_name]
             centroid = subject.get_unique(
-                pipeline='bundle_seg_nonrigid',clustering=clustering_method,
+                pipeline='bundle_seg',clustering=clustering_method,
                 bundle=bundle_name)
             centroid_path = centroid.path
             model_bundle = subject.get_unique(
-                pipeline='bundle_seg_nonrigid',suffix='tracto',datatype='atlas',
+                pipeline='bundle_seg',suffix='tracto',datatype='atlas',
                 bundle=bundle_name)
             model_bundle_path = model_bundle.path
             print(f"Traitement du bundle {bundle_name} avec centroids {centroid_path}, full bundle {model_bundle_path}")
@@ -525,60 +541,54 @@ def process_hcp_association(subject,pipeline=pipeline,n_pts=50):
             # Refresh the subject object to ensure it has the latest data
             subject = Subject(subject.sub_id, db_root=subject.db_root)
 
+
+def process_one_subject(sub):
+    try:
+        subject = ds.get_subject(sub)
+        print(f"Processing subject: {sub}")
+        process_hcp_association(subject, pipeline=args.pipeline, n_pts=args.n_pts)
+    except Exception as e:
+        print(f"Erreur lors du traitement du sujet {sub}: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+
+def association():
+    args = parse_args('association')
+    HCP_REFERENCE = args.model_ref
+    HCP_FULL_BUNDLE_DIR = args.model_bundles
+    HCP_CENTROIDS_DIR = args.model_centroids
+    if args.model_parcellations:
+        HCP_PARC = args.model_parcellations
+
 if __name__ == "__main__":
-    # If hostname is calcarine, set tempdir to /local/ndecaux/tmp
-    n_proc=8
+    args = parse_args()
+
+    HCP_REFERENCE = args.model_ref
+    HCP_FULL_BUNDLE_DIR = args.model_bundles
+    HCP_CENTROIDS_DIR = args.model_centroids
+    if args.model_parcellations:
+        HCP_PARC = args.model_parcellations
+
+    # If hostname is calcarine, set tempdir to /local/ndecaux/tmp.
+    n_proc = args.n_proc or 8
     if os.uname()[1] == 'calcarine':
         tempfile.tempdir = '/local/ndecaux/tmp'
-        n_proc=20
+        n_proc = args.n_proc or 20
 
     config, tools = set_config()
-    print("HCP Association pipeline : ", pipeline)
+    print("HCP Association pipeline : ", args.pipeline)
     print("=====================================")
     print('Reading dataset')
-    # db_root = '/home/ndecaux/NAS_EMPENN/share/users/ndecaux/dysdiago/bids'
-    # db_root = '/home/ndecaux/NAS_EMPENN/share/projects/actidep/bids'
-    
-    dataset='actidep'
-    db_root=f"/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids"
 
-    ds = Dataset(db_root)
+    ds = Dataset(args.db_root)
     print(f"Found {len(ds.subject_ids)} subjects")
     print("=====================================")
     
-    def process_one_subject(sub):
-        try:
-            subject = ds.get_subject(sub)
-            # Vérifier si le sujet a des fichiers VTK dans mcm_to_hcp_space
-            # vtk_files = subject.get(
-            #     pipeline='mcm_to_hcp_space',
-            #     space='HCP', 
-            #     extension='vtk',
-            #     datatype='tracto'
-            # )
-            # if len(vtk_files) == 0:
-            #     print(f"Skipping subject {sub} - pas de fichiers VTK dans mcm_to_hcp_space")
-            #     return
-            # Vérifier si les associations existent déjà
-            # existing_associations = subject.get(
-            #     pipeline=pipeline,
-            #     desc='associations',
-            #     extension='vtk'
-            # )
-            # if len(existing_associations) > 70:
-            #     print(f"Skipping subject {sub} - associations déjà existantes")
-            #     return
-            print(f"Processing subject: {sub}")
-            process_hcp_association(subject,n_pts=100)
-        except Exception as e:
-            print(f"Erreur lors du traitement du sujet {sub}: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-
-    # Use multiprocessing to process subjects in parallel
-    with multiprocessing.Pool(n_proc) as pool:
-        #pool.map(process_one_subject,ds.subject_ids)
-        pool.map(process_one_subject,ds.subject_ids)
+    subject_ids = [args.subject] if args.subject else ds.subject_ids
+    if args.step == 'association':
+        # Use multiprocessing to process subjects in parallel.
+        with multiprocessing.Pool(n_proc) as pool:
+            pool.map(process_one_subject, subject_ids)
     print("HCP Association pipeline completed")
 

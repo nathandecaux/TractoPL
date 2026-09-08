@@ -4,8 +4,6 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 
-import vtk
-from vtk.util.numpy_support import numpy_to_vtk
 import nibabel as nib
 from dipy.tracking.streamline import Streamlines, set_number_of_points
 from dipy.segment.clustering import QuickBundles
@@ -18,25 +16,12 @@ import shapely
 from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.metrics import silhouette_score, silhouette_samples
-
+from TractoPL.data.vtk_loader import load_vtk, save_vtk
 
 # ====================== I/O ======================
 
 def load_vtk_streamlines(vtk_file_path):
-    reader = vtk.vtkPolyDataReader()
-    reader.SetFileName(vtk_file_path)
-    reader.Update()
-    polydata = reader.GetOutput()
-    lines = polydata.GetLines()
-    streamlines = []
-    lines.InitTraversal()
-    id_list = vtk.vtkIdList()
-    while lines.GetNextCell(id_list):
-        pts = []
-        for j in range(id_list.GetNumberOfIds()):
-            pid = id_list.GetId(j)
-            pts.append(polydata.GetPoint(pid))
-        streamlines.append(np.array(pts))
+    streamlines, _ = load_vtk(vtk_file_path)
     return streamlines
 
 
@@ -201,96 +186,44 @@ def direction_rgb(points):
     rgb = np.abs(tangents) / norms
     return (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
 
-def _attach_direction_rgb(polydata, per_point_dirs):
-    """Add a 3-component uint8 'direction_rgb' (also tagged as active scalars 'RGB')."""
-    arr = np.vstack(per_point_dirs).astype(np.uint8)
-    vtk_arr = numpy_to_vtk(arr, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-    vtk_arr.SetName('direction_rgb')
-    vtk_arr.SetNumberOfComponents(3)
-    polydata.GetPointData().AddArray(vtk_arr)
-
 def write_centroids_vtk(path, centroids_streamlines, point_arrays=None, add_direction_rgb=False):
     """
     point_arrays: optional dict name -> array of length len(centroids_streamlines),
     one scalar per centroid replicated on each of its points.
     """
-    centroid_polydata = vtk.vtkPolyData()
-    centroid_points = vtk.vtkPoints()
-    centroid_lines = vtk.vtkCellArray()
-    centroid_polydata.SetPoints(centroid_points)
-    centroid_indices = []
-    per_point_extras = {name: [] for name in (point_arrays or {})}
-    per_point_dirs = [] if add_direction_rgb else None
+    scalar_dict = {
+        'centroid_index': np.concatenate([
+            np.full(len(centroid), centroid_id, dtype=int)
+            for centroid_id, centroid in enumerate(centroids_streamlines)
+        ]) if centroids_streamlines else np.array([], dtype=int),
+    }
     for cid, c in enumerate(centroids_streamlines):
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(len(c))
-        for i, p in enumerate(c):
-            pid = centroid_points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
-            line.GetPointIds().SetId(i, pid)
-            centroid_indices.append(cid)
-            for name, arr in (point_arrays or {}).items():
-                per_point_extras[name].append(arr[cid])
-        centroid_lines.InsertNextCell(line)
-        if add_direction_rgb:
-            per_point_dirs.append(direction_rgb(c))
-    centroid_polydata.SetLines(centroid_lines)
-    centroid_index_array = numpy_to_vtk(np.array(centroid_indices), deep=True)
-    centroid_index_array.SetName('centroid_index')
-    centroid_polydata.GetPointData().AddArray(centroid_index_array)
-    for name, vals in per_point_extras.items():
-        a = numpy_to_vtk(np.asarray(vals, dtype=float), deep=True)
-        a.SetName(name)
-        centroid_polydata.GetPointData().AddArray(a)
-    if add_direction_rgb and per_point_dirs:
-        _attach_direction_rgb(centroid_polydata, per_point_dirs)
-    w = vtk.vtkPolyDataWriter()
-    w.SetFileName(path)
-    w.SetInputData(centroid_polydata)
-    w.Write()
+        for name, values in (point_arrays or {}).items():
+            scalar_dict.setdefault(name, []).append(
+                np.full(len(c), values[cid], dtype=float)
+            )
+    if add_direction_rgb:
+        scalar_dict['direction_rgb'] = [direction_rgb(centroid) for centroid in centroids_streamlines]
+    save_vtk(centroids_streamlines, path, scalar_dict=scalar_dict)
 
 def write_model_with_labels_vtk(path, streamlines, labels, per_streamline_arrays=None, add_direction_rgb=False):
     """
     per_streamline_arrays: optional dict name -> array of length len(streamlines),
     one scalar per streamline replicated on each of its points.
     """
-    model_polydata = vtk.vtkPolyData()
-    model_points = vtk.vtkPoints()
-    model_lines = vtk.vtkCellArray()
-    model_polydata.SetPoints(model_points)
-    model_centroid_indices = []
-    model_point_indices = []
-    per_point_extras = {name: [] for name in (per_streamline_arrays or {})}
-    per_point_dirs = [] if add_direction_rgb else None
+    scalar_dict = {
+        'centroid_index': [np.full(len(streamline), labels[index], dtype=int)
+                           for index, streamline in enumerate(streamlines)],
+        'point_index': [np.arange(len(streamline), dtype=int) for streamline in streamlines],
+    }
     for sidx, s in enumerate(streamlines):
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(len(s))
-        for i, p in enumerate(s):
-            pid = model_points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
-            line.GetPointIds().SetId(i, pid)
-            model_centroid_indices.append(labels[sidx])
-            model_point_indices.append(i)
-            for name, arr in (per_streamline_arrays or {}).items():
-                per_point_extras[name].append(arr[sidx])
-        model_lines.InsertNextCell(line)
-        if add_direction_rgb:
-            per_point_dirs.append(direction_rgb(s))
-    model_polydata.SetLines(model_lines)
-    arr_centroid_index = numpy_to_vtk(np.array(model_centroid_indices), deep=True)
-    arr_centroid_index.SetName('centroid_index')
-    model_polydata.GetPointData().AddArray(arr_centroid_index)
-    arr_point_index = numpy_to_vtk(np.array(model_point_indices), deep=True)
-    arr_point_index.SetName('point_index')
-    model_polydata.GetPointData().AddArray(arr_point_index)
-    for name, vals in per_point_extras.items():
-        a = numpy_to_vtk(np.asarray(vals, dtype=float), deep=True)
-        a.SetName(name)
-        model_polydata.GetPointData().AddArray(a)
-    if add_direction_rgb and per_point_dirs:
-        _attach_direction_rgb(model_polydata, per_point_dirs)
-    w = vtk.vtkPolyDataWriter()
-    w.SetFileName(path)
-    w.SetInputData(model_polydata)
-    w.Write()
+        for name, values in (per_streamline_arrays or {}).items():
+            scalar_dict.setdefault(name, []).append(
+                np.full(len(s), values[sidx], dtype=float)
+            )
+    if add_direction_rgb:
+        scalar_dict['direction_rgb'] = [direction_rgb(streamline) for streamline in streamlines]
+    save_vtk(streamlines, path, scalar_dict=scalar_dict)
 
 
 # ====================== Bundle pipeline (2 steps) ======================
@@ -492,8 +425,7 @@ def parse_args():
                     help="Fraction of the longest fibers (per final cluster) used for the alternative centroid (default: 0.15)")
     return p.parse_args()
 
-
-if __name__ == "__main__":
+def main():
     args = parse_args()
     normalization = None if args.normalization == "none" else args.normalization
 
@@ -513,3 +445,6 @@ if __name__ == "__main__":
     with open(out_path, 'w') as f:
         json.dump(info, f, indent=2)
     print(f"\nInfo saved: {out_path}")
+
+if __name__ == "__main__":
+    main()

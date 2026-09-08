@@ -85,7 +85,7 @@ from functools import partial
 import traceback
 import uuid
 import socket
-
+from TractoPL.scripts.convert_tractogram import convert_tractogram
 
 name_mapping = {
         "Fractional anisotropy": "FA",
@@ -1301,20 +1301,8 @@ def add_mcm_to_tracts(tracts, mcm_file, reference=None, full=False,**kwargs):
         mcm_weights = mcm_obj.get_weights()
         print("MCM Weights file:", mcm_weights)
 
-        cmd = [
-            "flip_tractogram", tracts.path, converted_input_vtk_path, "--reference",
-            reference.path#, '-ft','lps2ras'
-        ]
-        print("Converting tracts to VTK format...")
-        print("Command:", ' '.join(cmd))
-        call(cmd)
-
-        #Now call flip_vtk
-        cmd = [
-            "flip_vtk", converted_input_vtk_path, converted_input_vtk_path,'--compartment_map_file',mcm_weights
-        ]
-        print("Flipping VTK tracts...")
-        print("Command:", ' '.join(cmd))
+        convert_tractogram(tracts.path, converted_input_vtk_path, reference.path, flip=False)
+        print('coucou')
         # call(cmd)
 
 

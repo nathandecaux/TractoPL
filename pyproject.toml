@@ -11,6 +11,13 @@ packages = [
 [tool.poetry.dependencies]
 python = "^3.8"
 
+[tool.poetry.scripts]
+tractopl-apply-trans-to-vtk = "TractoPL.scripts.apply_trans_to_vtk:main"
+tractopl-convert-tractogram = "TractoPL.scripts.convert_tractogram:main"
+tractopl-frechet-clustering = "TractoPL.atlasing.frechet_clustering:main"
+tractopl-generate-centroid = "TractoPL.atlasing.generate_centroid:main"
+tractopl-afq-analysis = "TractoPL.analysis.AFQ_analysis:main"
+
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"

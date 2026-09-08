@@ -16,12 +16,25 @@ from subprocess import call
 import json
 from tqdm import tqdm
 from time import sleep
+import argparse
 
-HCP_CENTROIDS_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_cortex"
-# HCP_CENTROIDS_DIR  = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_longcentral"
-HCP_REFERENCE = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz"
-HCP_BUNDLES = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/"
-HCP_DENSITIES= "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/density_maps"
+# HCP_CENTROIDS_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_cortex"
+# # HCP_CENTROIDS_DIR  = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_longcentral"
+# HCP_REFERENCE = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz"
+# HCP_BUNDLES = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/"
+# HCP_DENSITIES= "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/density_maps"
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Bundle segmentation pipeline")
+    parser.add_argument('step',help="Processing step",choices=['segmentation'])
+    parser.add_argument('--model-ref','-r', help='Path to the model reference image.')
+    parser.add_argument('-model-bundles','-b', help='Path to the model bundles.') 
+    parser.add_argument('--model-centroids','-c', help='Path to the model centroids.')
+    parser.add_argument('--subject','-s', help='Path to the subject.')
+    parser.add_argument('--db-root','-d', help='Path to the database root.')
+    return parser.parse_args()
+
 def init_pipeline(subject, pipeline, **kwargs):
     """Initialize the MCM pipeline"""
     create_pipeline_description(
@@ -71,7 +84,6 @@ def register_template_to_anat(subject, pipeline, atlas_name='HCP105Group1Cluster
     atlas_name : str
         Name of the atlas to use for registration. Default is 'HCP105Group1Clustered'.
     """
-    print('COUCOU')
 
     # Load the anatomical image
     anat = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
@@ -83,7 +95,7 @@ def register_template_to_anat(subject, pipeline, atlas_name='HCP105Group1Cluster
     # Register the atlas template to the subject's anatomical image
     # def ants_registration(moving, fixed, outprefix='registered',transform_type='affine', **kwargs):
     print('Registering template to subject anatomical image', anat.path)
-    res_dict=ants_registration(HCP_REFERENCE, anat.path, outprefix='to_anat', moving_space='HCP', fixed_space='subject', transform_type='syn', **kwargs)
+    res_dict=ants_registration(HCP_REFERENCE, anat.path, outprefix='to_anat', moving_space='HCP', fixed_space='subject', transform_type='synquick', **kwargs)
 
     #Get the entry in res_dict that contains desc=='1Warp'
     entry = [k for k,v in res_dict.items() if v.get('desc','') == 'Warped']
@@ -93,14 +105,14 @@ def register_template_to_anat(subject, pipeline, atlas_name='HCP105Group1Cluster
     new_entities=res_dict[entry]
     res_dict[entry]=upt_dict(new_entities,atlas=atlas_name,suffix='anat')
     # Save the transformation matrix
-    copy_from_dict(subject,res_dict,pipeline='bundle_seg_nonrigid')
+    copy_from_dict(subject,res_dict,pipeline='bundle_seg')
     return True
 
 def move_fa_to_template_space(subject, pipeline,atlas_name='HCP105Group1Clustered', **kwargs):
     #Use the inverse transform to move the subject FA to template space
 
-    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='1InverseWarp', extension='nii.gz')
-    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='0GenericAffine')
+    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
+    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='0GenericAffine')
 
     fa_subject = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
     if len(subject.get(pipeline=pipeline, suffix='anat', desc='WarpedToTemplate', extension='nii.gz')) > 0:
@@ -128,21 +140,28 @@ def apply_trans_to_HCP_bundles(subject, pipeline, moving_space='HCP', **kwargs):
         Space of the moving image. Default is 'HCP'.
     """
     # Load the transformation matrix
-    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='1InverseWarp', extension='nii.gz')
-    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='0GenericAffine')
+    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
+    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='0GenericAffine')
 
     moving_image = HCP_REFERENCE
     fixed_image = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
 
-    hcp_bundles = glob(f'{HCP_BUNDLES}/summed_*.trk')
+    hcp_bundles = glob(f'{HCP_BUNDLES}/*CST_left.trk')
+    print(f"Looking for HCP bundles in {HCP_BUNDLES}")
+    if len(hcp_bundles) == 0:
+        hcp_bundles = glob(f'{HCP_BUNDLES}/*CST_left.vtk')
+    if len(hcp_bundles) == 0:
+        raise FileNotFoundError(f"No HCP bundles found in {HCP_BUNDLES}")
+
     print(f'Found {len(hcp_bundles)} HCP bundles to transform')
+    f_type='trk' if hcp_bundles[0].endswith('.trk') else 'vtk'
 
     for bundle_path in tqdm(hcp_bundles, desc="Transforming HCP bundles"):
         res_dict = {}
-        if len(subject.get(pipeline='bundle_seg_nonrigid', bundle=bundle_path.split('summed_')[-1].split('.trk')[0].replace('_',''), datatype='atlas', space='subject', atlas=moving_space,suffix='tracto'))>0:
+        if len(subject.get(pipeline='bundle_seg', bundle=bundle_path.split('summed_')[-1].split('.'+f_type)[0].replace('_',''), datatype='atlas', space='subject', atlas=moving_space,suffix='tracto'))>0:
             print(f'Bundle {bundle_path} already exists, skipping')
             continue
-        bundle_name = bundle_path.split('summed_')[-1].split('.trk')[0]
+        bundle_name = bundle_path.split('summed_')[-1].split('.'+f_type)[0]
         print(f'Transforming bundle {bundle_name}')
         output_entities = upt_dict(subject.get_unique(suffix='tracto', pipeline='msmt_csd', label='brain',algo='ifod2',extension='tck').get_full_entities(),
                                    {'bundle': bundle_name.replace('_',''), "datatype":'atlas', 'space': 'subject', 'atlas': moving_space, 'desc': 'transformed', 'suffix': 'tracto', 'extension': 'trk'})
@@ -150,14 +169,18 @@ def apply_trans_to_HCP_bundles(subject, pipeline, moving_space='HCP', **kwargs):
         output_path = os.path.join(tempfile.gettempdir(), f"{subject.sub_id}_transformed_{bundle_name}.trk")
         #Create folder if not exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        cmd = f"apply_trans_to_vtk.py {bundle_path} -o {output_path} -t {affine.path} --invert-affine -t {inv_warp.path} --moving-image {moving_image} --fixed-image {fixed_image}"
+
+        need_flip = True if f_type == 'vtk' else False
+        cmd = f"tractopl-apply-trans-to-vtk {bundle_path} -o {output_path} -t {affine.path} --invert-affine -t {inv_warp.path} --moving-image {moving_image} --fixed-image {fixed_image}"
+        # if need_flip:
+        #     cmd += " --flip --ants-space RAS"
         print(cmd)
         call(cmd, shell=True)
         res_dict[output_path] = output_entities
-        copy_from_dict(subject,res_dict,pipeline="bundle_seg_nonrigid",remove_after_copy=False)
+        copy_from_dict(subject,res_dict,pipeline="bundle_seg",remove_after_copy=False)
 
     # Clean up temporary files
-    temp_files = glob(os.path.join(tempfile.gettempdir(), f"{subject.sub_id}_transformed_*.trk"))
+    temp_files = glob(os.path.join(tempfile.gettempdir(), f"{subject.sub_id}_transformed_*.{f_type}"))
     for temp_file in temp_files:
         os.remove(temp_file)
 
@@ -174,13 +197,17 @@ def apply_trans_to_HCP_clusters(subject, pipeline, moving_space='HCP',overwrite=
         Space of the moving image. Default is 'HCP'.
     """
     # Load the transformation matrix
-    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='1InverseWarp', extension='nii.gz')
-    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg_nonrigid', desc='0GenericAffine')
+    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
+    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='0GenericAffine')
 
     moving_image = HCP_REFERENCE
     fixed_image = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
 
     hcp_bundles = glob(f'{HCP_CENTROIDS_DIR}/*_centroids.vtk')
+    if len(hcp_bundles) == 0:
+        hcp_bundles = glob(f'{HCP_CENTROIDS_DIR}/*_centroids.trk')
+        if len(hcp_bundles) == 0:
+            raise FileNotFoundError(f'No HCP clusters found in {HCP_CENTROIDS_DIR}')
     print(f'Found {len(hcp_bundles)} HCP clusters to transform')
     cluster_type=os.path.basename(HCP_CENTROIDS_DIR).split('_')[-1]
     # hcp_bundles = [b for b in hcp_bundles if 'CST_left' in b]
@@ -189,7 +216,7 @@ def apply_trans_to_HCP_clusters(subject, pipeline, moving_space='HCP',overwrite=
 
         bundle_name = os.path.basename(bundle_path).split('summed_')[-1].split('_centroids.vtk')[0]
         
-        if len(subject.get(pipeline='bundle_seg_nonrigid', bundle=bundle_name.replace('_',''), datatype='atlas', space='subject', atlas=moving_space, clustering=cluster_type))>0 and not overwrite:
+        if len(subject.get(pipeline='bundle_seg', bundle=bundle_name.replace('_',''), datatype='atlas', space='subject', atlas=moving_space, clustering=cluster_type))>0 and not overwrite:
             print(f'Cluster {bundle_name} already exists, skipping')
             continue
         print(f'Transforming cluster {bundle_name}')
@@ -198,11 +225,11 @@ def apply_trans_to_HCP_clusters(subject, pipeline, moving_space='HCP',overwrite=
         output_path = os.path.join(tempfile.gettempdir(), f"{subject.sub_id}_transformed_{bundle_name}.vtk")
         #Create folder if not exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        cmd = f"apply_trans_to_vtk.py {bundle_path} -o {output_path} -t {affine.path} --invert-affine -t {inv_warp.path} --moving-image {moving_image} --fixed-image {fixed_image}"
+        cmd = f"tractopl-apply-trans-to-vtk {bundle_path} -o {output_path} -t {affine.path} --invert-affine -t {inv_warp.path} --moving-image {moving_image} --fixed-image {fixed_image}"
         print(cmd)
         call(cmd, shell=True)
         res_dict[output_path] = output_entities
-        copy_from_dict(subject,res_dict,pipeline="bundle_seg_nonrigid",remove_after_copy=False)
+        copy_from_dict(subject,res_dict,pipeline="bundle_seg",remove_after_copy=False)
 
 
 def run_bundleseg(subject, pipeline, atlas_dir='/home/ndecaux/Data/Atlas',config='config.json', **kwargs):
@@ -259,7 +286,7 @@ def run_bundleseg_autocalibration(subject,pipeline='bundle_seg',**kwargs):
     copy_from_dict(subject,res_dict,pipeline=pipeline+'_autocalib')
 
 
-def run_bundle_seg_on_registered_atlas(subject, pipeline='bundle_seg_nonrigid', **kwargs):
+def run_bundle_seg_on_registered_atlas(subject, pipeline='bundle_seg', **kwargs):
     """
     Run the bundlesegmentation pipeline on the given subject using the registered atlas.
 
@@ -284,12 +311,12 @@ def run_bundle_seg_on_registered_atlas(subject, pipeline='bundle_seg_nonrigid', 
     res_dict=process_bundleseg(tracto, anat_subject, atlas_dir=atlas_dir)
     copy_from_dict(subject,res_dict,pipeline=pipeline)
 
-def run_tractosearch_on_registered_atlas(subject, pipeline='bundle_seg_nonrigid', **kwargs):
+def run_tractosearch_on_registered_atlas(subject, pipeline='bundle_seg', **kwargs):
     if isinstance(subject, str):
         subject = Subject(subject)
 
     print(pipeline)
-    already_done = subject.get(suffix='tracto', pipeline=pipeline+'_redo', extension='trk',datatype='tracto')
+    already_done = subject.get(suffix='tracto', pipeline=pipeline, extension='trk',datatype='tracto')
 
     anat_subject=subject.get_unique(pipeline='preprocessing', metric='FA', extension='nii.gz')
     model_bundles = subject.get(pipeline=pipeline, suffix='tracto', atlas='HCP', extension='trk',datatype='atlas')
@@ -304,8 +331,8 @@ def run_tractosearch_on_registered_atlas(subject, pipeline='bundle_seg_nonrigid'
     model_dict={m.get_full_entities()['bundle']:m for m in model_bundles}
 
     tracto = subject.get_unique(suffix='tracto', pipeline='msmt_csd', label='brain',algo='ifod2',extension='tck')
-    res_dict=process_tractosearch(tracto, model_dict, radius=10.0, in_nii=anat_subject.path,ref_nii=anat_subject.path)
-    copy_from_dict(subject,res_dict,pipeline=pipeline+'_redo', remove_after_copy=False)
+    res_dict=process_tractosearch(tracto, model_dict, radius=5.0, in_nii=anat_subject.path,ref_nii=anat_subject.path)
+    copy_from_dict(subject,res_dict,pipeline=pipeline, remove_after_copy=False)
     
 
 def run_bundle_seg_selected_bundles(subject, pipeline, bundle_list, **kwargs):
@@ -469,8 +496,8 @@ def filter_by_endings(subject, pipeline, bundle_name, datatype='endings', **kwar
     
     
     # Load the endings segmentation
-    beginnings = subject.get_unique(suffix='mask', pipeline='bundle_seg_nonrigid', bundle=bundle_name, datatype=datatype, label='start')
-    endings = subject.get_unique(suffix='mask', pipeline='bundle_seg_nonrigid', bundle=bundle_name, datatype=datatype, label='end')
+    beginnings = subject.get_unique(suffix='mask', pipeline='bundle_seg', bundle=bundle_name, datatype=datatype, label='start')
+    endings = subject.get_unique(suffix='mask', pipeline='bundle_seg', bundle=bundle_name, datatype=datatype, label='end')
     
     # Filter the streamlines by their endings
     filtered_tracto = filter_tracto_by_endings_dipy(tracto, reference=subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz'), start_mask=beginnings, end_mask=endings, **kwargs)
@@ -492,7 +519,7 @@ def filter_by_hcp_endings(subject, pipeline, **kwargs):
         Additional keyword arguments for processing
     """
 
-    endings_pipeline = 'bundle_seg_nonrigid'
+    endings_pipeline = 'bundle_seg'
     tracto_pipeline = 'msmt_csd'
     ending_list = subject.get(suffix='mask', datatype='atlasendings', pipeline=endings_pipeline)
     bundle_set = set([x.get_full_entities()['bundle'] for x in ending_list])
@@ -699,7 +726,7 @@ def list_missing_bundleseg(dataset, pipeline):
 
     return missing_bundles
 
-def segment_subject_bundleseg(subject,pipeline='recobundle_segmentation', **kwargs):
+def segment_subject_bundleseg(subject,pipeline='recobundle_segmentation',pipeline_list=None, **kwargs):
     """
     Process the MSMT-CSD pipeline on the given subject.
 
@@ -712,25 +739,26 @@ def segment_subject_bundleseg(subject,pipeline='recobundle_segmentation', **kwar
     if isinstance(subject, str):
         subject = Subject(subject)
     # Define processing steps
-    pipeline_list = [
-        # 'init',
-        # 'register_template_to_anat',
-        # 'apply_trans_to_HCP_bundles',
-        'apply_trans_to_HCP_clusters',
-        # 'move_fa_to_template_space',
-        # 'run_tractosearch_on_registered_atlas',
-        # 'get_hcp_endings',
-        # 'get_hcp_bundle_masks',
-        # 'get_subject_bundle_masks',
-        # 'filter_by_hcp_endings',
-        # 'run_bundle_seg_on_registered_atlas'
-        # 'run_bundleseg',
-        # 'run_bundleseg_on_SLF',
-        # 'run_bundleseg_on_centroids',
-        # 'run_bundleseg_autocalibration',
-        # 'get_bundleseg_endings',
-        # "project_metric_onto_bundleseg"
-    ]
+    if not pipeline_list:
+        pipeline_list = [
+            # 'init',
+            # 'register_template_to_anat',
+            # 'apply_trans_to_HCP_bundles',
+            'apply_trans_to_HCP_clusters',
+            # 'move_fa_to_template_space',
+            # 'run_tractosearch_on_registered_atlas',
+            # 'get_hcp_endings',
+            # 'get_hcp_bundle_masks',
+            # 'get_subject_bundle_masks',
+            # 'filter_by_hcp_endings',
+            # 'run_bundle_seg_on_registered_atlas'
+            # 'run_bundleseg',
+            # 'run_bundleseg_on_SLF',
+            # 'run_bundleseg_on_centroids',
+            # 'run_bundleseg_autocalibration',
+            # 'get_bundleseg_endings',
+            # "project_metric_onto_bundleseg"
+        ]
 
     # Process each requested pipeline step
     step_mapping = {
@@ -767,11 +795,11 @@ def process_single_subject(arg):
     """Process a single subject with the given arguments"""
 
     try :
-        sub, dataset_path, pipeline = arg
+        sub, dataset_path, pipeline,pipeline_list = arg
         print(f"Processing subject {sub} with pipeline {pipeline}")
         ds=Dataset(dataset_path)
         # subject = Subject(sub, db_root=dataset_path)
-        return segment_subject_bundleseg(ds.get_subject(sub), pipeline=pipeline)
+        return segment_subject_bundleseg(ds.get_subject(sub), pipeline=pipeline,pipeline_list=pipeline_list)
     except Exception as e:
         print(f"Error processing subject {sub}: {e}")
         print(f"Full traceback:\n{traceback.format_exc()}")
@@ -779,95 +807,20 @@ def process_single_subject(arg):
 
 from pprint import pprint
 
+
+
+
+
 if __name__ == "__main__":
-    pipeline = 'bundle_seg_nonrigid'
+    args=parse_args()
     num_processes = 1
-
-    if os.uname()[1] == 'calcarine':
-        num_processes = 24
-        print("calcarine")
-        # tempfile.tempdir = '/home/ndecaux/NAS_EMPENN/share/projects/actidep/bundle_seg'
-        tempfile.tempdir = '/local/ndecaux/bundle_seg'
-        #also set the TMPDIR env variable
-        os.environ['TMPDIR'] = tempfile.tempdir
-    else:
-        num_processes = 12
-        print(f"Not calcarine, using {num_processes} processes")
-        tempfile.tempdir = '/home/ndecaux/.tmp'
-        os.environ['TMPDIR'] = tempfile.tempdir
-    # else:
-    #     #Tempdir on home
-    #     tempfile.tempdir = os.path.join(os.path.expanduser('~'), 'bundle_seg')
-    #     os.environ['TMPDIR'] = tempfile.tempdir
-
-
-    config, tools = set_config()
-    # subject = Subject('100206',db_root='/home/ndecaux/Data/HCP/')
-
-    # dataset_path = '/home/ndecaux/Code/Data/comascore'
-
-    dataset="actidep"
-    dataset_path = f'/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids'
-
-    # dataset_path = '/home/ndecaux/NAS_EMPENN/share/projects/actidep/bids'
-
-    # dataset_path = '/home/ndecaux/NAS_EMPENN/share/users/ndecaux/dysdiago/bids'
-    # dataset_path='/home/ndecaux/NAS_EMPENN/share/projects/actidep/IRM_Cerveau_MOI/bids'
-    ds = Dataset(dataset_path)
-    # pprint(list_missing_bundleseg(ds, pipeline='bundle_seg_old'))
-
-    # pipeline='bundle_seg'
-    # missing_bundles = list_missing_bundleseg(ds, pipeline=pipeline)
-    # pprint(missing_bundles)
-
-    # for sub, bundles in missing_bundles.items():
-    #     print(f"Processing subject {sub} with missing bundles: {bundles}")
-    #     run_bundle_seg_selected_bundles(sub, pipeline=pipeline, bundle_list=bundles)
-
-    # sub= Subject('00001',db_root=dataset_path)
-
-    # run_bundleseg(sub, pipeline=pipeline, atlas_name='SCIL')
-
-
-    # # sub = Subject('01002', db_root=dataset_path)
-
-    # # project_metric_onto_bundleseg(sub, pipeline=pipeline, metric_name='FA')
-
-    subject_ids = ds.subject_ids
-    args = [(sub, pipeline) for sub in subject_ids]
-    args_filtered = []
-    flag=False
-    for arg in args:
-        sub, pipeline = arg
-        if flag == False and sub == '03026':
-            continue
-        else:
-            flag=True
-        
-        # sub = Subject(sub, db_root=dataset_path)
-        args_filtered.append((sub, dataset_path, pipeline))
-
-    args = args_filtered
-    print(f"Found {len(args)} subjects to process")
-
-
-    # # Définir le nombre de processus (ajustez selon les ressources disponibles)
-    #multiprocessing.cpu_count() - 1  # Laisse un CPU libre
-
-    # Pour exécuter en séquentiel (commentez les lignes multiprocessing ci-dessous)
-    # for arg in args:
-    #     process_single_subject(arg)
-
-    # Exécution parallèle avec multiprocessing
-    print(f"Démarrage du traitement parallèle avec {num_processes} processus")
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        results = pool.map(process_single_subject, args)
-
-    # print("Traitement terminé pour tous les sujets")
-
-
-    ## Copy the bundlesegmentation result to the subject's directory
-    # for sub in ds.subject_ids:
-    #     subject = Subject(sub, db_root=dataset_path)
-    #     result_folder = "/local/ndecaux/BundleSegResults"
-    #     copy_bundleseg_result(subject, result_folder, pipeline=pipeline)
+    global HCP_REFERENCE
+    HCP_REFERENCE=args.model_ref
+    HCP_BUNDLES=args.model_bundles
+    HCP_CENTROIDS_DIR=args.model_centroids
+    dataset_path = args.db_root
+    pipeline_name = 'bundle_seg'
+    if args.step == 'segmentation':
+        pipeline_list = ['register_template_to_anat','apply_trans_to_HCP_bundles','apply_trans_to_HCP_clusters','run_tractosearch_on_registered_atlas']
+ 
+    process_single_subject((args.subject, dataset_path, pipeline_name, pipeline_list))

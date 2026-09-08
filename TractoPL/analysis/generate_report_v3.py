@@ -35,7 +35,7 @@ from TractoPL.set_config import get_HCP_bundle_names
 from TractoPL.data.loader import Dataset
 import argparse
 # --- Fonctions stats / modèles / visualisation depuis report_stats_v3 ---
-from TractoPL.analysis.generate_report_v2 import resample_bundle_data
+from TractoPL.analysis.AFQ_analysis import resample_bundle_data
 from TractoPL.analysis.report_stats_v3 import (
     # Constantes & configuration
     STAT_TYPES, AFQ_ALPHA, AFQ_NPERM, FWE_METHOD, POLY_DEGREE,

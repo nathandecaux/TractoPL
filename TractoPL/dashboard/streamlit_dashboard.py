@@ -22,7 +22,7 @@ from scipy import stats
 from scipy.stats import f as f_dist
 from scipy.interpolate import interp1d
 import statsmodels.api as sm
-from TractoPL.analysis.generate_report_v2 import interpolate_missing_points, resample_bundle_data
+from TractoPL.analysis.AFQ_analysis import interpolate_missing_points, resample_bundle_data
 
 DATASET = 'actidep'
 AVAILABLE_DATASETS = ['actidep', 'dysdiago','amynet']

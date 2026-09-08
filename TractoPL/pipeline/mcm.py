@@ -375,7 +375,7 @@ def mcm_to_hcp_bundles(subject, pipeline, bundle_name='ALL', **kwargs):
         #         print(f"Error removing {f}: {e}")
 
         tracts = subject.get(suffix='tracto', bundle=bundle_name,
-                             extension='trk', pipeline='bundle_seg_nonrigid',atlas='HCP')
+                             extension='trk', pipeline='bundle_seg',atlas='HCP')
         if len(tracts) == 0:
             print(
                 f"Bundle {bundle_name} not found for subject {subject}. Skipping.")
@@ -534,7 +534,7 @@ def process_mcm_pipeline(subject, pipeline='mcm_tensors',pipeline_list=None):
                                                              'optimizer', 'levenberg')
                                                          ),
             'create_fake_mcm_from_dti': lambda: create_fake_mcm_from_dti(subject, pipeline),
-        'mcm_to_bundleseg_tracts': lambda: mcm_to_bundleseg_tracts(subject, pipeline, bundle_name='ALL',overwrite=False,bundle_pipeline='bundle_seg_nonrigid'),
+        'mcm_to_bundleseg_tracts': lambda: mcm_to_bundleseg_tracts(subject, pipeline, bundle_name='ALL',overwrite=False,bundle_pipeline='bundle_seg'),
         'mcm_to_bundleseg_tracts_full': lambda: mcm_to_bundleseg_tracts_full(subject, pipeline, bundle_name='ALL',overwrite=True),
         'mcm_to_hcp_bundles': lambda: mcm_to_hcp_bundles(subject, pipeline, overwrite=True),
         'get_mcm_metrics': lambda: get_mcm_metrics(subject, pipeline,bundle_name='ALL', overwrite=True),

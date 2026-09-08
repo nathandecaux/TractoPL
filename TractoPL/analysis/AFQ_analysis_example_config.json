@@ -1,0 +1,38 @@
+{
+    "pipeline": "test",
+    "dataset": "/PATH/TO/DATASET",
+    "hcp_asso_pipeline": "tractometry",
+    "group_variables": {
+        "GROUP_VARIABLE_1": {
+            "confounds": ["age"]
+        },
+        "GROUP_VARIABLE_2": {
+            "confounds": ["age", "CONFOND_RELATED_TO_NON_CONTROLS"]
+        }
+    },
+    "corr_variables": {
+        "CONTINUOUS_VARIABLE_1": {
+            "confounds": ["age"]
+        },
+        "CONTINUOUS_VARIABLE_2": {
+            "confounds": ["age"]
+        }
+    },
+    "test_by_group": "GROUP_VARIABLE",
+    "FWE_METHOD": "clusterFWE",
+    "AFQ_ALPHA": 0.05,
+    "AFQ_NPERM": 1000,
+    "CORRECT_MULTI_TRACT": false,
+    "MULTIPROCESSING": true,
+    "MISSING_SUBJECTS_TOLERANCE": 1,
+    "INTERPOLATE_MISSING_POINTS": 2,
+    "METRIC_COLUMNS_CANDIDATES": ["FA", "IFW"],
+    "STAT_TYPES": ["mean", "median"],
+    "CORRELATION_TEST": "pearson",
+    "EXCLUDE": {
+        "group": ["hc"]
+    },
+    "additional_info_path": null,
+    "actimetry_path": null,
+    "output_dir": null
+}
