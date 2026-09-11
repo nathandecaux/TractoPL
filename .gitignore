@@ -1,1 +1,8 @@
 *.pyc
+apptainer_tmp
+
+
+TractoPL/__pycache__/
+*.sif
+plan.md
+*__pycache__

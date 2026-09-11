@@ -3,7 +3,7 @@ from TractoPL.set_config import set_config
 from TractoPL.data.loader import Subject, Dataset
 from TractoPL.data.io import copy2nii, move2nii, copy_list, copy_from_dict
 from TractoPL.utils.tools import del_key, upt_dict, create_pipeline_description, CLIArg
-from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template, process_bundleseg
+from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template
 from TractoPL.utils.tractography import get_tractogram_endings
 from TractoPL.utils.mcm import name_mapping as mcm_name_mapping
 from TractoPL.analysis.tractometry import process_projection

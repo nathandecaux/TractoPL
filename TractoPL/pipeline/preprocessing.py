@@ -16,6 +16,10 @@ import click
 
 pipeline = 'preprocessing'
 
+
+def _as_subject(subject, db_root=None):
+    return subject if isinstance(subject, Subject) else Subject(subject, db_root)
+
 def flip_bvec_y(bvec_path, output_path):
     """
     Flip bvec in y direction by multiplying y component by -1
@@ -27,18 +31,20 @@ def flip_bvec_y(bvec_path, output_path):
         bvec_data[:, 1] *= -1  # Flip y component
     np.savetxt(output_path, bvec_data, fmt='%.6f')
 
-def animaPreprocessing(subject, with_reversed_b0 = True, db_root='/home/ndecaux/Code/Data/dysdiago'):
+def animaPreprocessing(
+    subject,
+    with_reversed_b0=True,
+    db_root=None,
+    flip_bvecs=True,
+    temp_dir=None,
+):
     """
     Calls the Anima diffusion preprocessing script on the given subject.
     """
     
-    # Generate temporary folder in /local/ndecaux/tmp/
-    import time
-    temp_dir = f"/local/ndecaux/tmp/preprocessing_{int(time.time())}"
+    temp_dir = temp_dir or tempfile.mkdtemp(prefix="tractopl-preprocessing-")
     os.makedirs(temp_dir, exist_ok=True)
-    
-    if isinstance(subject, str):
-        subject = Subject(subject, db_root)
+    subject = _as_subject(subject, db_root)
 
     # Preprocess diffusion data
     print("Preprocess diffusion data")
@@ -67,16 +73,14 @@ def animaPreprocessing(subject, with_reversed_b0 = True, db_root='/home/ndecaux/
     bvec = subject.get(suffix='dwi',scope='raw',extension='bvec')[0]
     temp_bvec = os.path.join(temp_dir, os.path.basename(bvec.path))
 
-    # Flip bvec in y direction
-    flip_bvec_y(bvec.path, temp_bvec)
+    if flip_bvecs:
+        flip_bvec_y(bvec.path, temp_bvec)
+    else:
+        shutil.copy2(bvec.path, temp_bvec)
     
     if with_reversed_b0:
         temp_b0_reversed = os.path.join(temp_dir, os.path.basename(b0_reversed.path))
         shutil.copy2(b0_reversed.path, temp_b0_reversed)
-    
-    # Change to temp directory for processing
-    original_dir = os.getcwd()
-    os.chdir(temp_dir)
     
     #Get directory and prefix of dwi file
     dwiPrefix = os.path.basename(dwi.path).split('.')[0] 
@@ -84,18 +88,19 @@ def animaPreprocessing(subject, with_reversed_b0 = True, db_root='/home/ndecaux/
     #Get files with full path
     dicom_files = [f for f in glob.glob(os.path.join(dicom_folder, "**", "*"), recursive=True) if os.path.isfile(f)]
     print(dicom_files[:10])
-    os.chdir(temp_dir)
-    # preprocCommand = ["python3", tools['animaDiffusionImagePreprocessing'], "-t", temp_t1, "-i", temp_dwi,'--temp-folder',temp_dir]
-    preprocCommand = ["animaDiffusionImagePreprocessing", "-t", temp_t1, "-i", temp_dwi]
+    preprocCommand = [
+        "python3",
+        tools['animaDiffusionImagePreprocessing'],
+        "-t",
+        temp_t1,
+        "-i",
+        temp_dwi,
+    ]
 
 
-    ### Dysdiago ??? -d à changer
-    if 'dysdiago' in db_root:
-        preprocCommand = preprocCommand + ["-d", "0"]
+    if flip_bvecs:
         preprocCommand = preprocCommand + ["-g", temp_bvec]
 
-
-    # else :
     preprocCommand +=  ["-D"] + dicom_files
 
     preprocCommand = preprocCommand + ["-b", temp_bval]
@@ -105,18 +110,16 @@ def animaPreprocessing(subject, with_reversed_b0 = True, db_root='/home/ndecaux/
         preprocCommand = preprocCommand + ["-r", temp_b0_reversed]
 
     print(preprocCommand)
-    call(preprocCommand)
+    call(preprocCommand, cwd=temp_dir)
     
     print("Preprocess data finished")
-    # os.chdir(original_dir)
-    
     entities = {'suffix':'dwi','pipeline':pipeline}
     # pipeline = 'preprocessing'
     
-    tensors = dwiPrefix + "_Tensors.nrrd"
-    preprocessed_dwi = dwiPrefix + "_preprocessed.nrrd"
-    preprocessed_bvec = dwiPrefix + "_preprocessed.bvec"
-    brain_mask = dwiPrefix + "_brainMask.nrrd"
+    tensors = os.path.join(temp_dir, dwiPrefix + "_Tensors.nrrd")
+    preprocessed_dwi = os.path.join(temp_dir, dwiPrefix + "_preprocessed.nrrd")
+    preprocessed_bvec = os.path.join(temp_dir, dwiPrefix + "_preprocessed.bvec")
+    brain_mask = os.path.join(temp_dir, dwiPrefix + "_brainMask.nrrd")
 
 
     entities=dwi.get_full_entities()
@@ -145,13 +148,13 @@ def animaPreprocessing(subject, with_reversed_b0 = True, db_root='/home/ndecaux/
     # shutil.rmtree(temp_dir)
 
 
-def compute_dti(subject, db_root='/home/ndecaux/Code/Data/dysdiago'):
+def compute_dti(subject, db_root=None):
     """
     Computes DTI tensors from the preprocessed diffusion data.
     """
     config,tools = set_config()
     
-    subject = Subject(subject, db_root)
+    subject = _as_subject(subject, db_root)
     
     preproc_dwi = subject.get_unique(suffix='dwi',pipeline=pipeline,desc='preproc',extension='nii.gz')
     preproc_bvec= subject.get_unique(suffix='dwi',pipeline=pipeline,desc='preproc',extension='bvec')
@@ -173,13 +176,13 @@ def compute_dti(subject, db_root='/home/ndecaux/Code/Data/dysdiago'):
     print(preproc_dwi.get_full_entities())
     copy_from_dict(subject, res_dict, pipeline=pipeline)
     
-def compute_fa(subject, db_root='/home/ndecaux/Code/Data/dysdiago'):
+def compute_fa(subject, db_root=None):
     """
     Computes FA from the preprocessed diffusion data.
     """
     config,tools = set_config()
     
-    subject = Subject(subject, db_root)
+    subject = _as_subject(subject, db_root)
     
     tensors = subject.get_unique(suffix='dwi',pipeline=pipeline,model='DTI',metric=None)
     print(tensors.path)
@@ -196,7 +199,7 @@ def compute_fa(subject, db_root='/home/ndecaux/Code/Data/dysdiago'):
     print(tensors.get_full_entities())
     copy_from_dict(subject, res_dict, pipeline=pipeline)
 
-def process_all_FA(db_root='/home/ndecaux/Code/Data/dysdiago',subjects=None):
+def process_all_FA(db_root=None,subjects=None):
     """
     Process all subjects in the database to compute FA.
     """
@@ -219,10 +222,10 @@ def process_all_FA(db_root='/home/ndecaux/Code/Data/dysdiago',subjects=None):
             print(f"Error processing subject {subject}: {e}")
 
 @click.command()
-@click.option('--subject', prompt='Subject ID', help='The subject ID to preprocess.')
-@click.option('--db_root', prompt='Database root', help='Root directory of the BIDS database.')
-@click.option('--with_reversed_b0', default=True, help='Whether to use reversed B0 images for distortion correction.')
-def prepocessing(subject, db_root, with_reversed_b0):
+@click.option('--subject', required=True, help='Subject ID to preprocess.')
+@click.option('--db-root', required=True, help='Root directory of the BIDS database.')
+@click.option('--with-reversed-b0/--without-reversed-b0', default=True, show_default=True, help='Use reversed B0 images for distortion correction.')
+def cli(subject, db_root, with_reversed_b0):
     """
     Run the full preprocessing pipeline: animaPreprocessing, compute_dti, and compute_fa.
     """
@@ -235,6 +238,9 @@ def prepocessing(subject, db_root, with_reversed_b0):
     except Exception as e:
         print(f"Error during preprocessing for subject {subject}: {e}")
 
+
+prepocessing = cli
+
 if __name__ == '__main__':
     config,tools = set_config()
-    prepocessing()  
+    cli()

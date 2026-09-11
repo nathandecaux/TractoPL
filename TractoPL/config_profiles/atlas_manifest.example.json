@@ -1,0 +1,11 @@
+{
+  "name": "my-atlas",
+  "reference": "images/reference_fa.nii.gz",
+  "bundles_dir": "bundles",
+  "centroids_dir": "centroids",
+  "parcellations_dir": "parcellations",
+  "bundle_mapping": {
+    "CSTleft": "CST_left",
+    "CSTright": "CST_right"
+  }
+}

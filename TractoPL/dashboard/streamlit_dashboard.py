@@ -9,6 +9,7 @@ Usage:
 import os
 from os.path import join as opj
 import glob
+import json
 import re
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -24,18 +25,14 @@ from scipy.interpolate import interp1d
 import statsmodels.api as sm
 from TractoPL.analysis.AFQ_analysis import interpolate_missing_points, resample_bundle_data
 
-DATASET = 'actidep'
-AVAILABLE_DATASETS = ['actidep', 'dysdiago','amynet']
-
-
-def get_dataset_paths(dataset: str) -> dict:
-    """Retourne les chemins de fichiers pour un dataset donné."""
-    base = f"/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids"
+def get_dataset_paths(dataset_path: str) -> dict:
+    """Return conventional optional metadata paths for a BIDS dataset root."""
+    base = os.path.abspath(os.path.expanduser(dataset_path))
     return {
         'dataset_path': base,
-        'subjects_file': f"/home/ndecaux/Code/actiDep/subjects.txt",
+        'subjects_file': os.path.join(base, 'subjects.txt'),
         'participants_file': f"{base}/participants_full_info.xlsx",
-        'actimetry_file': f"{base}/actimetry_features.xlsx" if dataset == 'actidep' else None,
+        'actimetry_file': f"{base}/actimetry_features.xlsx",
     }
 
 
@@ -78,15 +75,9 @@ def color_to_rgba(color: str, alpha: float = 1.0) -> str:
 # Configuration
 # =============================================================================
 
-# Chemins par défaut (recalculés dynamiquement dans main() selon le dataset sélectionné)
-_default_paths = get_dataset_paths(DATASET)
-DATASET_PATH = _default_paths['dataset_path']
-SUBJECTS_FILE = _default_paths['subjects_file']
-PARTICIPANTS_FILE = _default_paths['participants_file']
-ACTIMETRY_FILE = _default_paths['actimetry_file']
-
 MODEL = 'MCM'
-DEFAULT_PIPELINE = 'hcp_association_24pts'
+DEFAULT_PIPELINE = 'tractometry'
+TRACTOMETRY_MARKER = '.tag_tractometry'
 
 METRICS = ['FA', 'MD', 'RD', 'AD', 'IFW', 'IRF']
 STAT_TYPES = ['mean', 'std', 'median', 'gmm_mean', 'gmm_std', 'gmm_prec']
@@ -107,18 +98,36 @@ PIPELINE_COLORS = px.colors.qualitative.Set2
 
 @st.cache_data(ttl=3600)
 def get_available_pipelines(dataset_path: str) -> List[str]:
-    """Détecte les pipelines disponibles dans le dossier derivatives."""
+    """Detect tractometry derivatives from explicit metadata or metric outputs."""
     derivatives_path = opj(dataset_path, 'derivatives')
     if not os.path.exists(derivatives_path):
         return []
     
-    # Chercher les dossiers correspondant au pattern hcp_association*
-    pattern = opj(derivatives_path, 'hcp_association*')
-    pipeline_dirs = glob.glob(pattern)
-    
-    # Extraire les noms des pipelines
-    pipelines = [os.path.basename(p) for p in pipeline_dirs if os.path.isdir(p)]
-    
+    pipelines = []
+    for pipeline_dir in glob.glob(opj(derivatives_path, '*')):
+        if not os.path.isdir(pipeline_dir):
+            continue
+        pipeline_name = os.path.basename(pipeline_dir)
+        description_path = opj(pipeline_dir, 'dataset_description.json')
+        is_tractometry = os.path.isfile(opj(pipeline_dir, TRACTOMETRY_MARKER))
+        try:
+            with open(description_path, encoding='utf-8') as description_file:
+                description = json.load(description_file)
+            pipeline_description = description.get('PipelineDescription', {})
+            description_name = pipeline_description.get('Name', description.get('Name', ''))
+            is_tractometry = is_tractometry or 'tractometry' in description_name.lower()
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        metric_pattern = opj(
+            pipeline_dir,
+            'sub-*',
+            'metric',
+            '*_bundle-*_model-*_*.csv',
+        )
+        is_tractometry = is_tractometry or bool(glob.glob(metric_pattern))
+        is_tractometry = is_tractometry or pipeline_name.startswith('hcp_association')
+        if is_tractometry:
+            pipelines.append(pipeline_name)
     return sorted(pipelines)
 
 @st.cache_data(ttl=3600)
@@ -2436,7 +2445,7 @@ def render_subject_table_tab(
 
 def main():
     st.set_page_config(
-        page_title=f"Visualiseur de Statistiques {DATASET.capitalize()}",
+        page_title="Visualiseur de Statistiques TractoPL",
         page_icon="chart_with_upwards_trend",
         layout="wide"
     )
@@ -2469,7 +2478,7 @@ def main():
     defaults = {
         'data_loaded': False,
         'invert_points': {},  # Dict pipeline_name -> bool
-        'param_dataset': DATASET,
+        'param_dataset_path': os.environ.get('TRACTOPL_DATASET_ROOT', ''),
         # Paramètres de visualisation
         'param_metric': 'FA',
         'param_stat_type': 'mean',
@@ -2520,21 +2529,20 @@ def main():
     with st.sidebar:
         st.header("Configuration des données")
 
-        # Sélection du dataset
-        dataset_idx = AVAILABLE_DATASETS.index(st.session_state.param_dataset) if st.session_state.param_dataset in AVAILABLE_DATASETS else 0
-        selected_dataset = st.selectbox(
-            "Dataset",
-            options=AVAILABLE_DATASETS,
-            index=dataset_idx,
-            key="dataset_select"
+        dataset_path = st.text_input(
+            "Racine du dataset BIDS",
+            value=st.session_state.param_dataset_path,
+            key="dataset_path_input",
         )
-        if selected_dataset != st.session_state.param_dataset:
-            st.session_state.param_dataset = selected_dataset
+        if dataset_path != st.session_state.param_dataset_path:
+            st.session_state.param_dataset_path = dataset_path
             st.session_state.data_loaded = False  # Forcer le rechargement
             st.rerun()
 
-        # Chemins dynamiques selon le dataset sélectionné
-        _paths = get_dataset_paths(selected_dataset)
+        _paths = get_dataset_paths(st.session_state.param_dataset_path) if st.session_state.param_dataset_path else None
+        if _paths is None:
+            st.info("Saisissez la racine d'un dataset BIDS pour détecter les derivatives.")
+            return
         _dataset_path = _paths['dataset_path']
         _subjects_file = _paths['subjects_file']
         _participants_file = _paths['participants_file']
@@ -2553,7 +2561,7 @@ def main():
             "Pipelines",
             options=available_pipelines,
             default=default_pipelines,
-            help="Sélectionnez une ou plusieurs pipelines (pattern: hcp_association*)"
+            help="Sélectionnez une ou plusieurs pipelines de tractométrie détectées dans derivatives/."
         )
         
         if not selected_pipelines:

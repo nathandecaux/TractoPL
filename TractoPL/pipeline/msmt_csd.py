@@ -18,6 +18,28 @@ import shutil
 from time import sleep
 import click
 
+DEFAULT_STEPS = (
+    'init',
+    'response',
+    'fod',
+    'normalize',
+    'fixels',
+    'fixels2peaks',
+    'fixel_density',
+    'ifod2_tracto',
+)
+
+
+def validate_steps(steps):
+    """Return requested pipeline steps after validating their names."""
+    requested_steps = tuple(steps or DEFAULT_STEPS)
+    supported_steps = set(DEFAULT_STEPS) | {'peaks', 'peak_density', 'trekker_tracto'}
+    unknown_steps = sorted(set(requested_steps) - supported_steps)
+    if unknown_steps:
+        raise ValueError(f"Unsupported MSMT-CSD steps: {', '.join(unknown_steps)}")
+    return requested_steps
+
+
 def already_done(subject, pipeline, out_entities):
     """Check if all output entities already exist for the subject in the given pipeline"""
     if len(subject.get(**out_entities)) > 0:
@@ -48,7 +70,8 @@ def init_pipeline(subject, pipeline, **kwargs):
 def process_response(subject, dwi_data, pipeline, **kwargs):
     """Calculate tissue response functions"""
     dwi, bval, bvec, mask = dwi_data
-    if already_done(subject, pipeline, {'suffix':'response', 'label':'WM'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'response', 'label':'WM'}) and not force:
         print("Response functions already exist, skipping computation.")
         return
     res_dict = get_tissue_responses(dwi, bval, bvec, mask, inverse_bvec=True, **kwargs)
@@ -56,7 +79,8 @@ def process_response(subject, dwi_data, pipeline, **kwargs):
 
 def process_fod(subject, dwi_data, pipeline, **kwargs):
     """Run MSMT-CSD to calculate fiber orientation distributions"""
-    if already_done(subject, pipeline, {'suffix':'fod', 'label':'WM'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'fod', 'label':'WM'}) and not force:
         print("FODs already exist, skipping computation.")
         return
     dwi, bval, bvec, mask = dwi_data
@@ -79,7 +103,8 @@ def process_fod(subject, dwi_data, pipeline, **kwargs):
 
 def process_normalize(subject, pipeline, **kwargs):
     """Normalize FODs"""
-    if already_done(subject, pipeline, {'suffix':'fod', 'label':'WM', 'desc':'normalized'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'fod', 'label':'WM', 'desc':'normalized'}) and not force:
         print("Normalized FODs already exist, skipping computation.")
         return
     wm_fod = subject.get_unique(label='WM', suffix='fod', pipeline=pipeline, desc='preproc')
@@ -91,7 +116,8 @@ def process_normalize(subject, pipeline, **kwargs):
 
 def process_fixels(subject, pipeline, **kwargs):
     """Perform fixel-based analysis"""
-    if already_done(subject, pipeline, {'extension':'fixel', 'label':'WM'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'extension':'fixel', 'label':'WM'}) and not force:
         print("Fixels already exist, skipping computation.")
         return
     wm_fod = subject.get_unique(label='WM', model='fod', pipeline=pipeline, desc='preproc', suffix='fod')
@@ -115,7 +141,8 @@ def process_peak_density(subject, pipeline, **kwargs):
 
 def process_fixels2peaks(subject, pipeline, **kwargs):
     """Convert fixels to peaks"""
-    if already_done(subject, pipeline, {'suffix':'peaks', 'label':'WM', 'desc':'fixels2peaks'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'peaks', 'label':'WM', 'desc':'fixels2peaks'}) and not force:
         print("Fixel peaks already exist, skipping computation.")
         return
     fixels = subject.get_unique(extension='fixel', label='WM', pipeline=pipeline)
@@ -127,7 +154,8 @@ def process_fixels2peaks(subject, pipeline, **kwargs):
 
 def process_fixel_density(subject, pipeline, **kwargs):
     """Calculate density from fixel peaks"""
-    if already_done(subject, pipeline, {'suffix':'density', 'label':'WM', 'desc':'fixel'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'density', 'label':'WM', 'desc':'fixel'}) and not force:
         print("Fixel density already exist, skipping computation.")
         return
     fixel_peaks = subject.get_unique(suffix='peaks', label='WM', pipeline=pipeline, desc='fixels2peaks')
@@ -137,7 +165,8 @@ def process_fixel_density(subject, pipeline, **kwargs):
 
 def process_ifod2_tracto(subject, pipeline, **kwargs):
     """Run iFOD2 tractography"""
-    if already_done(subject, pipeline, {'suffix':'tracto', 'algo':'ifod2'}) and not kwargs.get('force', False):
+    force = kwargs.pop('force', False)
+    if already_done(subject, pipeline, {'suffix':'tracto', 'algo':'ifod2'}) and not force:
         print("iFOD2 tractography already exist, skipping computation.")
         return
     odf = subject.get_unique(suffix='fod', label='WM', desc='preproc', pipeline=pipeline)
@@ -153,7 +182,15 @@ def process_trekker_tracto(subject, pipeline, **kwargs):
     copy_from_dict(subject, tracto, pipeline='trekker',datatype='tracto',algo='trekker')
 
 
-def process_msmt_csd(subject):
+def process_msmt_csd(
+    subject,
+    steps=None,
+    pipeline='msmt_csd',
+    tractography_algorithm='ifod2',
+    n_streamlines=1000000,
+    force=False,
+    wait_seconds=0,
+):
     """
     Process the MSMT-CSD pipeline on the given subject.
     
@@ -165,53 +202,54 @@ def process_msmt_csd(subject):
 
     if isinstance(subject, str):
         subject = Subject(subject)
-    pipeline = 'msmt_csd'
+    pipeline_list = validate_steps(steps)
+    if tractography_algorithm not in {'ifod2', 'trekker'}:
+        raise ValueError("tractography_algorithm must be 'ifod2' or 'trekker'")
+    if n_streamlines <= 0:
+        raise ValueError("n_streamlines must be greater than zero")
 
-    # Define processing steps
-    pipeline_list = [
-        'init',
-        'response',
-        'fod',
-        'normalize',
-        'fixels',
-        # 'peaks',
-        # 'peak_density',
-        'fixels2peaks',
-        "fixel_density",
-        'ifod2_tracto',
-        # 'trekker_tracto'
-    ]
+    if 'ifod2_tracto' in pipeline_list and tractography_algorithm == 'trekker':
+        pipeline_list = tuple(
+            'trekker_tracto' if step == 'ifod2_tracto' else step
+            for step in pipeline_list
+        )
     
     # Get DWI data that will be used across multiple steps
-    dwi_data = get_dwi_data(subject)
+    dwi_data = get_dwi_data(subject) if {'response', 'fod'} & set(pipeline_list) else None
     
     # Process each requested pipeline step
     step_mapping = {
         'init': lambda: init_pipeline(subject, pipeline),
-        'response': lambda: process_response(subject, dwi_data, pipeline),
-        'fod': lambda: process_fod(subject, dwi_data, pipeline),
-        'normalize': lambda: process_normalize(subject, pipeline),
-        'fixels': lambda: process_fixels(subject, pipeline,force=True,afd=True,peak=True,disp=True),
+        'response': lambda: process_response(subject, dwi_data, pipeline, force=force),
+        'fod': lambda: process_fod(subject, dwi_data, pipeline, force=force),
+        'normalize': lambda: process_normalize(subject, pipeline, force=force),
+        'fixels': lambda: process_fixels(subject, pipeline, force=force, afd=True, peak=True, disp=True),
         'peaks': lambda: process_peaks(subject, pipeline),
         'peak_density': lambda: process_peak_density(subject, pipeline),
-        'fixels2peaks': lambda: process_fixels2peaks(subject, pipeline),
-        'fixel_density': lambda: process_fixel_density(subject, pipeline),
-        'ifod2_tracto': lambda: process_ifod2_tracto(subject, pipeline,n_streams=CLIArg('-select', 1000000)),
-        'trekker_tracto': lambda: process_trekker_tracto(subject, pipeline,n_seeds=1000000)
+        'fixels2peaks': lambda: process_fixels2peaks(subject, pipeline, force=force),
+        'fixel_density': lambda: process_fixel_density(subject, pipeline, force=force),
+        'ifod2_tracto': lambda: process_ifod2_tracto(subject, pipeline, force=force, n_streams=CLIArg('-select', n_streamlines)),
+        'trekker_tracto': lambda: process_trekker_tracto(subject, pipeline, n_seeds=n_streamlines)
     }
     
     for step in pipeline_list:
         if step in step_mapping:
             print(f"Running step: {step}")
             step_mapping[step]()
-            sleep(5)
+            if wait_seconds:
+                sleep(wait_seconds)
             #Refresh the subject object to ensure it has the latest data
             subject = Subject(subject.sub_id, db_root=subject.db_root)
     
 @click.command()
-@click.option('--subject', prompt='Subject ID', help='The subject ID to preprocess.')
-@click.option('--db_root', prompt='Database root', help='Root directory of the BIDS database.')
-def process_subject(subject, db_root):
+@click.option('--subject', required=True, help='Subject ID to process.')
+@click.option('--db-root', required=True, help='Root directory of the BIDS database.')
+@click.option('--pipeline', default='msmt_csd', show_default=True, help='Derivative pipeline name.')
+@click.option('--step', 'steps', multiple=True, help='Step to run; repeat to select multiple steps.')
+@click.option('--tractography-algorithm', type=click.Choice(['ifod2', 'trekker']), default='ifod2', show_default=True)
+@click.option('--n-streamlines', type=click.IntRange(min=1), default=1000000, show_default=True)
+@click.option('--force', is_flag=True, help='Recompute existing outputs.')
+def process_subject(subject, db_root, pipeline, steps, tractography_algorithm, n_streamlines, force):
     """
     Process a single subject through the MSMT-CSD pipeline.
     
@@ -224,7 +262,14 @@ def process_subject(subject, db_root):
     """
     ds = Dataset(db_root)
     subject_obj = ds.get_subject(subject)
-    process_msmt_csd(subject_obj)
+    process_msmt_csd(
+        subject_obj,
+        steps=steps,
+        pipeline=pipeline,
+        tractography_algorithm=tractography_algorithm,
+        n_streamlines=n_streamlines,
+        force=force,
+    )
 
 if __name__ == "__main__":
     process_subject()

@@ -347,7 +347,7 @@ def create_pipeline_description(pipeline, layout,**kwargs):
     Create the dataset_description.json file for the given subject and pipeline.
     """
     dataset_description = {
-        "Name": f"actiDep {pipeline} pipeline",
+        "Name": f"TractoPL {pipeline} pipeline",
         "BIDSVersion": "1.10.0",
         "DatasetType": "derivative",
         "PipelineDescription": {

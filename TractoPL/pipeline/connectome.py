@@ -3,10 +3,11 @@ from TractoPL.set_config import set_config
 from TractoPL.data.loader import Subject, Dataset
 from TractoPL.data.io import copy2nii, move2nii, copy_list, copy_from_dict
 from TractoPL.utils.tools import del_key, upt_dict, create_pipeline_description, CLIArg
-from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template, process_bundleseg, prepare_atlas_for_recobundle, process_tractosearch
+from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template, prepare_atlas_for_recobundle, process_tractosearch
 from TractoPL.utils.tractography import get_tractogram_endings, filter_tracto_by_endings, get_fiber_density, compare_fiber_density
 from TractoPL.utils.registration import ants_registration
 from TractoPL.set_config import get_HCP_bundle_names
+from TractoPL.configuration import load_atlas_config
 from TractoPL.analysis.tractometry import process_projection
 import multiprocessing
 import tempfile
@@ -19,12 +20,16 @@ from time import sleep
 import numpy as np
 import nibabel as nib
 import pandas as pd
+import click
 
-HCP_CENTROIDS_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_frechetlong2"
-# HCP_CENTROIDS_DIR  = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_longcentral"
-HCP_REFERENCE = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz"
-HCP_BUNDLES = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/"
-HCP_DENSITIES= "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/density_maps"
+def _available_bundle_names(subject, pipeline, datatype='tracto', suffix='tracto', atlas_name=None):
+    query = {'pipeline': pipeline, 'datatype': datatype, 'suffix': suffix}
+    if atlas_name is not None:
+        query['atlas'] = atlas_name
+    bundles = subject.get(**query)
+    return sorted({bundle.get_entities().get('bundle') for bundle in bundles if bundle.get_entities().get('bundle')})
+
+
 def init_pipeline(subject, pipeline, **kwargs):
     """Initialize the MCM pipeline"""
     create_pipeline_description(
@@ -61,7 +66,7 @@ def init_pipeline(subject, pipeline, **kwargs):
 #     copy_from_dict(subject, bundle_tract, pipeline=pipeline, bundle=bundle, desc='noslr')
 #     return True
 
-def atlas_fiber_density(subject, pipeline, bundle='ALL', atlas_name='HCP', **kwargs):
+def atlas_fiber_density(subject, pipeline, bundle='ALL', atlas_name=None, **kwargs):
     """
     Compute the fiber density of a bundle in the atlas space
 
@@ -77,8 +82,8 @@ def atlas_fiber_density(subject, pipeline, bundle='ALL', atlas_name='HCP', **kwa
         Name of the atlas space to use
     """
 
-    if bundle=='ALL':
-        bundle=list(get_HCP_bundle_names().keys())
+    if bundle == 'ALL':
+        bundle = _available_bundle_names(subject, 'bundle_seg', atlas_name=atlas_name)
    # Load the reference image in atlas space
     reference_image = subject.get_unique(suffix='dwi', pipeline='preprocessing', metric='FA', extension='nii.gz')
     for b in bundle:
@@ -108,8 +113,8 @@ def subject_fiber_density(subject, pipeline, bundle='ALL', **kwargs):
         Name of the bundle to compute the fiber density for
     """
 
-    if bundle=='ALL':
-        bundle=list(get_HCP_bundle_names().keys())
+    if bundle == 'ALL':
+        bundle = _available_bundle_names(subject, 'bundle_seg')
    # Load the reference image in subject space
     reference_image = subject.get_unique(suffix='dwi', pipeline='preprocessing', metric='FA', extension='nii.gz')
     for b in bundle:
@@ -123,7 +128,7 @@ def subject_fiber_density(subject, pipeline, bundle='ALL', **kwargs):
 
     return True
 
-def compare_bundle_density(subject, pipeline, bundle='ALL', **kwargs):
+def compare_bundle_density(subject, pipeline, bundle='ALL', atlas_name=None, **kwargs):
     """
     Compare the fiber density of a bundle in the atlas space and in the subject space
 
@@ -137,8 +142,8 @@ def compare_bundle_density(subject, pipeline, bundle='ALL', **kwargs):
         Name of the bundle to compare the fiber density for
     """
 
-    if bundle=='ALL':
-        bundle=list(get_HCP_bundle_names().keys())
+    if bundle == 'ALL':
+        bundle = _available_bundle_names(subject, pipeline, suffix='density', atlas_name=atlas_name)
    # Load the reference image in subject space
     reference_image = subject.get_unique(suffix='dwi', pipeline='preprocessing', metric='FA', extension='nii.gz')
 
@@ -158,7 +163,7 @@ def compare_bundle_density(subject, pipeline, bundle='ALL', **kwargs):
     for b in bundle:
         print(f"Comparing bundle {b} for subject {subject.sub_id}")
         # Load the fiber density map in atlas space
-        atlas_density_path = subject.get_unique(suffix='density', pipeline=pipeline, bundle=b, atlas='HCP').path
+        atlas_density_path = subject.get_unique(suffix='density', pipeline=pipeline, bundle=b, atlas=atlas_name).path
         # Load the fiber density map in subject space
         subject_density = subject.get_unique(suffix='density', pipeline=pipeline, bundle=b,datatype='map')
         subject_density_path=subject_density.path
@@ -273,7 +278,7 @@ def compare_bundle_density(subject, pipeline, bundle='ALL', **kwargs):
 
     return True
 
-def connectome_pipeline(subject,pipeline='recobundle_segmentation', **kwargs):
+def connectome_pipeline(subject, pipeline='connectome', atlas_name=None, steps=None, **kwargs):
     """
     Process the MSMT-CSD pipeline on the given subject.
 
@@ -286,26 +291,20 @@ def connectome_pipeline(subject,pipeline='recobundle_segmentation', **kwargs):
     if isinstance(subject, str):
         subject = Subject(subject)
     # Define processing steps
-    pipeline_list = [
-        # 'init',
-        # "atlas_fiber_density",
-        # "subject_fiber_density",
-        "compare_bundle_density"
-    ]
+    pipeline_list = steps or ('compare_bundle_density',)
 
     # Process each requested pipeline step
     step_mapping = {
         'init': lambda: init_pipeline(subject, pipeline),
-        'atlas_fiber_density': lambda: atlas_fiber_density(subject, pipeline),
+        'atlas_fiber_density': lambda: atlas_fiber_density(subject, pipeline, atlas_name=atlas_name),
         'subject_fiber_density': lambda: subject_fiber_density(subject, pipeline),
-        'compare_bundle_density': lambda: compare_bundle_density(subject, pipeline)
+        'compare_bundle_density': lambda: compare_bundle_density(subject, pipeline, atlas_name=atlas_name)
     }
 
     for step in pipeline_list:
         if step in step_mapping:
             print(f"Running step: {step}")
             step_mapping[step]()
-            sleep(5)
             subject=Subject(subject.sub_id, db_root=subject.db_root)  # Reload subject to update database
     
     return True
@@ -315,110 +314,32 @@ def process_single_subject(arg):
     """Process a single subject with the given arguments"""
 
     try :
-        sub, dataset_path, pipeline = arg
+        sub, dataset_path, pipeline, atlas_name, steps = arg
         print(f"Processing subject {sub} with pipeline {pipeline}")
-        ds=Dataset(dataset_path,restore='/tmp/connectome_2')
+        ds=Dataset(dataset_path)
         # subject = Subject(sub, db_root=dataset_path)
-        return connectome_pipeline(ds.get_subject(sub), pipeline=pipeline)
+        return connectome_pipeline(ds.get_subject(sub), pipeline=pipeline, atlas_name=atlas_name, steps=steps)
     except Exception as e:
         print(f"Error processing subject {sub}: {e}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         return False
 
-from pprint import pprint
+@click.command()
+@click.option('--db-root', required=True, help='Root directory of the BIDS database.')
+@click.option('--atlas', required=True, help='Path to the atlas manifest JSON file.')
+@click.option('--subject', help='Subject ID. Processes all subjects when omitted.')
+@click.option('--pipeline', default='connectome', show_default=True, help='Derivative pipeline name.')
+@click.option('--step', 'steps', multiple=True, type=click.Choice(['init', 'atlas_fiber_density', 'subject_fiber_density', 'compare_bundle_density']))
+@click.option('--n-proc', type=click.IntRange(min=1), default=1, show_default=True)
+def cli(db_root, atlas, subject, pipeline, steps, n_proc):
+    """Compute connectome density metrics for one or more subjects."""
+    atlas_config = load_atlas_config(atlas)
+    dataset = Dataset(db_root)
+    subject_ids = [subject] if subject else dataset.subject_ids
+    jobs = [(subject_id, db_root, pipeline, atlas_config.name, steps) for subject_id in subject_ids]
+    with multiprocessing.Pool(processes=n_proc) as pool:
+        pool.map(process_single_subject, jobs)
+
 
 if __name__ == "__main__":
-    pipeline = 'connectome'
-    num_processes = 1
-
-    if os.uname()[1] == 'calcarine':
-        num_processes = 24
-        print("calcarine")
-        # tempfile.tempdir = '/home/ndecaux/NAS_EMPENN/share/projects/actidep/bundle_seg'
-        tempfile.tempdir = '/local/ndecaux/bundle_seg'
-        #also set the TMPDIR env variable
-        os.environ['TMPDIR'] = tempfile.tempdir
-    else:
-        num_processes = 12
-        print(f"Not calcarine, using {num_processes} processes")
-        tempfile.tempdir = '/home/ndecaux/bundle_seg'
-        os.environ['TMPDIR'] = tempfile.tempdir
-    # else:
-    #     #Tempdir on home
-    #     tempfile.tempdir = os.path.join(os.path.expanduser('~'), 'bundle_seg')
-    #     os.environ['TMPDIR'] = tempfile.tempdir
-
-
-    config, tools = set_config()
-    # subject = Subject('100206',db_root='/home/ndecaux/Data/HCP/')
-
-    # dataset_path = '/home/ndecaux/Code/Data/comascore'
-
-    dataset="dysdiago"
-    if dataset == "dysdiago":
-        dataset_path = '/home/ndecaux/NAS_EMPENN/share/users/ndecaux/dysdiago/bids'
-    else:
-        dataset_path = f'/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids'
-
-    # dataset_path = '/home/ndecaux/NAS_EMPENN/share/projects/actidep/bids'
-
-    # dataset_path = '/home/ndecaux/NAS_EMPENN/share/users/ndecaux/dysdiago/bids'
-    # dataset_path='/home/ndecaux/NAS_EMPENN/share/projects/actidep/IRM_Cerveau_MOI/bids'
-    ds = Dataset(dataset_path,restore='/tmp/connectome_2')
-    # pprint(list_missing_bundleseg(ds, pipeline='bundle_seg_old'))
-
-    # pipeline='bundle_seg'
-    # missing_bundles = list_missing_bundleseg(ds, pipeline=pipeline)
-    # pprint(missing_bundles)
-
-    # for sub, bundles in missing_bundles.items():
-    #     print(f"Processing subject {sub} with missing bundles: {bundles}")
-    #     run_bundle_seg_selected_bundles(sub, pipeline=pipeline, bundle_list=bundles)
-
-    # sub= Subject('00001',db_root=dataset_path)
-
-    # run_bundleseg(sub, pipeline=pipeline, atlas_name='SCIL')
-
-
-    # # sub = Subject('01002', db_root=dataset_path)
-
-    # # project_metric_onto_bundleseg(sub, pipeline=pipeline, metric_name='FA')
-
-    subject_ids = ds.subject_ids
-    args = [(sub, pipeline) for sub in subject_ids]
-    args_filtered = []
-    flag=False
-    for arg in args:
-        sub, pipeline = arg
-        if flag == False and sub == '03026':
-            continue
-        else:
-            flag=True
-        
-        # sub = Subject(sub, db_root=dataset_path)
-        args_filtered.append((sub, dataset_path, pipeline))
-
-    args = args_filtered
-    print(f"Found {len(args)} subjects to process")
-
-
-    # # Définir le nombre de processus (ajustez selon les ressources disponibles)
-    #multiprocessing.cpu_count() - 1  # Laisse un CPU libre
-
-    # Pour exécuter en séquentiel (commentez les lignes multiprocessing ci-dessous)
-    # for arg in args:
-    #     process_single_subject(arg)
-
-    # Exécution parallèle avec multiprocessing
-    print(f"Démarrage du traitement parallèle avec {num_processes} processus")
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        results = pool.map(process_single_subject, args)
-
-    # print("Traitement terminé pour tous les sujets")
-
-
-    ## Copy the bundlesegmentation result to the subject's directory
-    # for sub in ds.subject_ids:
-    #     subject = Subject(sub, db_root=dataset_path)
-    #     result_folder = "/local/ndecaux/BundleSegResults"
-    #     copy_bundleseg_result(subject, result_folder, pipeline=pipeline)
+    cli()

@@ -60,6 +60,8 @@ DEFAULT_CONFIG = {
     "pipeline": "default",
     "dataset": "/PATH/TO/DATASET",
     "hcp_asso_pipeline": "tractometry",
+    "group_variables": {},
+    "corr_variables": {},
 
     # --- Variables to analyse ---
     # Each variable maps to a dict with a "confounds" key listing the
@@ -130,20 +132,29 @@ def load_config(config_path: Optional[str] = None) -> Dict:
     dict
         Configuration dictionary.
     """
-    if config_path and os.path.exists(config_path):
+    if config_path:
         try:
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             print(f"Configuration loaded from: {config_path}")
             return config
-        except Exception as e:
-            print(f"Error loading config ({config_path}): {e}")
-            print("Falling back to default configuration.")
-            return DEFAULT_CONFIG.copy()
-    else:
-        if config_path:
-            print(f"Config file not found ({config_path}). Using default configuration.")
-        return DEFAULT_CONFIG.copy()
+        except FileNotFoundError as error:
+            raise FileNotFoundError(f"Configuration file not found: {config_path}") from error
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Configuration file is not valid JSON: {config_path}") from error
+    return DEFAULT_CONFIG.copy()
+
+
+def validate_config(config: Dict) -> None:
+    """Validate the minimum configuration required before starting an analysis."""
+    dataset_path = config.get("dataset")
+    if not isinstance(dataset_path, str) or not dataset_path or dataset_path == DEFAULT_CONFIG["dataset"]:
+        raise ValueError("Configuration key 'dataset' must contain a BIDS dataset path")
+    if not os.path.isdir(dataset_path):
+        raise FileNotFoundError(f"Configured dataset does not exist: {dataset_path}")
+    pipeline_name = config.get("hcp_asso_pipeline")
+    if not isinstance(pipeline_name, str) or not pipeline_name:
+        raise ValueError("Configuration key 'hcp_asso_pipeline' must be a pipeline name")
 
 
 def save_config(config: Dict, output_path: str) -> None:
@@ -2843,19 +2854,20 @@ def main():
         default=None,
         help="Path to CSV/XLSX with a 'participant_id' column "
         "listing subjects to include",
-        required=True,
+        required=False,
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
         help="Output directory for reports (overrides config)",
-        required=True
+        required=False
     )
     args = parser.parse_args()
 
     # --- Load configuration ---
     config = load_config(args.c)
+    validate_config(config)
 
     # --- Extract config values into globals ---
     dataset = config.get("dataset", DEFAULT_CONFIG["dataset"])

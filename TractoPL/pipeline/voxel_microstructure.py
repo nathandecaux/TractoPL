@@ -5,7 +5,7 @@ from TractoPL.set_config import set_config
 from TractoPL.data.loader import Subject, Dataset
 from TractoPL.data.io import copy2nii, move2nii, copy_list, copy_from_dict
 from TractoPL.utils.tools import del_key, upt_dict, create_pipeline_description, CLIArg
-from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template, process_bundleseg, prepare_atlas_for_recobundle, process_tractosearch
+from TractoPL.utils.recobundle import register_template_to_subject, call_recobundle,register_anat_subject_to_template, prepare_atlas_for_recobundle, process_tractosearch
 from TractoPL.utils.tractography import get_tractogram_endings, filter_tracto_by_endings, get_fiber_density
 from TractoPL.utils.registration import ants_registration
 from TractoPL.set_config import get_HCP_bundle_names

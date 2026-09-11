@@ -10,6 +10,16 @@ import pandas as pd
 import pickle
 _SENTINEL = object()  # Défini au niveau du module
 
+
+def _resolve_db_root(db_root):
+    """Resolve the dataset root from an argument or the public environment variable."""
+    resolved_root = db_root or os.environ.get("TRACTOPL_DATASET_ROOT")
+    if not resolved_root:
+        raise ValueError(
+            "db_root is required; pass it explicitly or set TRACTOPL_DATASET_ROOT"
+        )
+    return os.path.abspath(os.path.expanduser(os.fspath(resolved_root)))
+
 class LayoutProxy:
     """
     Une classe proxy qui simule l'interface d'un layout PyBIDS.
@@ -227,9 +237,9 @@ class Subject:
     """
     Sujet léger basé uniquement sur le DataFrame global de Dataset.
     """
-    def __init__(self, sub_id, db_root="/home/ndecaux/NAS_EMPENN/share/projects/actidep/bids", layout=None, parent_actidep=None):
+    def __init__(self, sub_id, db_root=None, layout=None, parent_actidep=None):
         self.sub_id = sub_id
-        self.db_root = db_root
+        self.db_root = _resolve_db_root(db_root)
         self.bids_id = f"sub-{sub_id}"
         self.layout = layout or LayoutProxy(db_root, self)
         self.parent_actidep = parent_actidep
@@ -403,8 +413,8 @@ class Dataset:
     """
     Gestion simplifiée de la base BIDS via un DataFrame unique.
     """
-    def __init__(self, db_root='/home/ndecaux/NAS_EMPENN/share/projects/actidep/bids',restore=False):
-        self.db_root = db_root
+    def __init__(self, db_root=None,restore=False):
+        self.db_root = _resolve_db_root(db_root)
         self.layout = LayoutProxy(db_root, self)
         self._df = None
         self._subjects_cache = {}
@@ -658,6 +668,22 @@ class Dataset:
 
     def get_subjects(self):
         return self.subject_ids
+
+    def describe(self):
+        """Return a compact, serializable summary of the indexed BIDS dataset."""
+        dataframe = self.build_dataframe()
+        derivatives = []
+        if not dataframe.empty and 'pipeline' in dataframe.columns:
+            derivatives = sorted(
+                pipeline
+                for pipeline in dataframe.loc[dataframe['derivative'] == True, 'pipeline'].dropna().unique()
+            )
+        return {
+            'root': self.db_root,
+            'subjects': list(self.subject_ids),
+            'file_count': len(dataframe),
+            'derivatives': derivatives,
+        }
     
     def to_dataframe(self):
         return self.build_dataframe()

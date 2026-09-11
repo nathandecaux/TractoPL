@@ -4,7 +4,7 @@ Version: 0.1.0
 Summary: Tractometry processing library for diffusion MRI data.
 Home-page: https://github.com/nathandecaux/TractoPL
 Author: Nathan Decaux
-Author-email: nathan.decaux@irisa.fr
+Author-email: nathan.decaux@hotmail.fr
 Classifier: Programming Language :: Python :: 3
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.6

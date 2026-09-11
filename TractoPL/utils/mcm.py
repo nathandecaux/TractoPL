@@ -1234,13 +1234,9 @@ def apply_transformation_to_vtk(vtk_file_path, reference_nifti_path, transformat
         print(f"Sample points after transformation: {sample_points_after}")
 
     # Enregistrer le polydata transformé dans un nouveau fichier VTK
-    #If hostname is calcarine, set tempdir to /local/ndecaux/tmp
-
-    hostname = socket.gethostname()
-    if hostname == 'calcarine':
-        transformed_vtk_path = '/local/ndecaux/tmp/transformed_polydata'+str(uuid.uuid4())+'.vtk'
-    else:
-        transformed_vtk_path = '/tmp/transformed_polydata'+str(uuid.uuid4())+'.vtk'
+    transformed_vtk_path = os.path.join(
+        tempfile.gettempdir(), f"transformed_polydata{uuid.uuid4()}.vtk"
+    )
     
     # Utiliser vtkPolyDataWriter pour l'écriture ASCII standard
     writer = vtk.vtkPolyDataWriter()

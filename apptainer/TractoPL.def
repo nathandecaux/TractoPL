@@ -1,0 +1,105 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+    Author Nathan Decaux <nathan.decaux@hotmail.fr>
+    Description TractoPL runtime with Anima 4.2, Conda MRtrix3, and ANTs
+
+%files
+    . /opt/tractopl
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        bzip2 \
+        git \
+        git-lfs \
+        libglib2.0-0 \
+        libgl1 \
+        libpng-dev \
+        libtiff-dev \
+        python3 \
+        python3-dev \
+        python3-pip \
+        python-is-python3 \
+        unzip \
+        wget \
+        zlib1g-dev
+    rm -rf /var/lib/apt/lists/*
+
+    wget -q -O /tmp/anima.zip \
+        https://github.com/Inria-Empenn/Anima-Public/releases/download/v4.2/Anima-Ubuntu-4.2.zip
+    mkdir -p /tmp/anima-extract
+    unzip -q /tmp/anima.zip -d /tmp/anima-extract
+    rm /tmp/anima.zip
+    anima_dir=$(find /tmp/anima-extract -mindepth 1 -maxdepth 1 -type d -print -quit)
+    test -n "$anima_dir"
+    mv "$anima_dir" /opt/anima
+    chmod +x /opt/anima/*
+    rm -rf /tmp/anima-extract
+    test -x /opt/anima/animaMCMEstimator
+
+    git clone --depth 1 \
+        https://github.com/Inria-Empenn/Anima-Scripts-Public.git /opt/anima-scripts-public
+    rm -rf /opt/anima-scripts-public/.git
+
+    git lfs install --skip-repo
+    git clone --depth 1 \
+        https://github.com/Inria-Empenn/Anima-Scripts-Data-Public.git /opt/anima-scripts-data-public
+    rm -rf /opt/anima-scripts-data-public/.git
+
+    wget -q -O /tmp/ants.zip \
+        https://github.com/ANTsX/ANTs/releases/download/v2.6.5/ants-2.6.5-almalinux8-X64-gcc.zip
+    mkdir -p /opt/ants
+    unzip -q /tmp/ants.zip -d /opt/ants
+    rm /tmp/ants.zip
+    ants_binary=$(find /opt/ants -type f -name antsRegistration -print -quit)
+    test -n "$ants_binary"
+    ln -s "$(dirname "$ants_binary")" /opt/ants/bin
+
+    wget -q -O /tmp/micromamba.tar.bz2 \
+        https://micro.mamba.pm/api/micromamba/linux-64/latest
+    tar -xjf /tmp/micromamba.tar.bz2 -C /tmp bin/micromamba
+    install -m 0755 /tmp/bin/micromamba /usr/local/bin/micromamba
+    rm -rf /tmp/bin /tmp/info /tmp/micromamba.tar.bz2
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba create -y -p /opt/conda \
+        -c conda-forge -c MRtrix3 mrtrix3 libstdcxx-ng
+    rm -rf /opt/micromamba/pkgs
+
+    python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed --upgrade pip
+    python3 -m pip install --no-cache-dir --break-system-packages /opt/tractopl
+    python3 -m pip install --no-cache-dir --break-system-packages h5py
+
+    git clone --depth 1 https://github.com/StongeEtienne/tractosearch.git /opt/tractosearch
+    python3 -m pip install --no-cache-dir --break-system-packages /opt/tractosearch
+    sed -i '1s|^#!.*|#!/usr/bin/python3|' /opt/tractosearch/scripts/*.py
+    chmod +x /opt/tractosearch/scripts/*.py
+    rm -rf /opt/tractosearch/.git
+
+%environment
+    export PATH=/opt/anima:/opt/conda/bin:/opt/ants/bin:/opt/tractosearch/scripts:$PATH
+    export TRACTOPL_ANIMA_DIR=/opt/anima
+    export TRACTOPL_ANIMA_DATA_DIR=/opt/anima-scripts-data-public
+    export TRACTOPL_ANIMA_SCRIPTS_DIR=/opt/anima-scripts-public
+    export TRACTOPL_ANIMA_PRIVATE_SCRIPTS_DIR=/opt/anima-scripts-public
+    export TRACTOPL_TRACTSEG_DIR=/opt/tractseg/bin
+    export TRACTOPL_MRTRIX_DIR=/opt/conda/bin
+
+%runscript
+    exec "$@"
+
+%test
+    animaMCMEstimator --help >/dev/null
+    dwi2response --help >/dev/null
+    antsRegistration --help >/dev/null
+    test -d /opt/anima-scripts-public/brain_extraction
+    test -d /opt/anima-scripts-data-public
+    tractosearch_nearest.py --help >/dev/null
+    tractopl-preprocessing --help >/dev/null
+    tractopl-msmt-csd --help >/dev/null
+    tractopl-mcm --help >/dev/null
+    tractopl-bundle-seg --help >/dev/null
+    tractopl-tractometry --help >/dev/null

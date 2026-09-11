@@ -5,8 +5,7 @@ from __future__ import print_function
 from collections import defaultdict
 
 import numpy as np
-from scipy.ndimage import binary_dilation
-from scipy.ndimage.interpolation import map_coordinates
+from scipy.ndimage import binary_dilation, map_coordinates
 from dipy.segment.clustering import QuickBundles
 from dipy.segment.metric import AveragePointwiseEuclideanMetric
 from scipy.spatial import cKDTree

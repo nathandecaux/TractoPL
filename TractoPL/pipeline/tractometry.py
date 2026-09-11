@@ -10,6 +10,7 @@ from TractoPL.data.io import copy2nii, move2nii, copy_list, copy_from_dict
 from TractoPL.utils.tools import del_key, upt_dict, create_pipeline_description, CLIArg,first_match
 from TractoPL.utils.clustering import associate_subject_to_centroids, get_stat_from_association_file,associate_subject_to_parcellation
 from TractoPL.set_config import get_HCP_bundle_names
+from TractoPL.configuration import AtlasConfig, load_atlas_config
 from dipy.tracking.streamline import set_number_of_points
 import tempfile
 import glob
@@ -19,27 +20,35 @@ import time
 import multiprocessing
 import argparse
 
-# Répertoire contenant les centroids HCP
-HCP_CENTROIDS_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/flipped/centroids_longcentral"
-HCP_FULL_BUNDLE_DIR = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/vtk/"
-HCP_REFERENCE = "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_anat.nii.gz"
-HCP_PARC="/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/radtract_parcellations"
 # pipeline='hcp_association_multiclusters_umapendpoints'
 pipeline='tractometry'
 
 CLUSTERING='cortex'
+TRACTOMETRY_MARKER = '.tag_tractometry'
+
+
+def mark_tractometry_derivative(dataset_root, pipeline):
+    """Mark a derivative directory so the dashboard can identify it."""
+    marker_path = pathlib.Path(dataset_root, 'derivatives', pipeline, TRACTOMETRY_MARKER)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch(exist_ok=True)
+
+
+def _atlas_bundle_name(atlas, bundle_name):
+    return atlas.bundle_name(bundle_name)
 
 def parse_args(step=None):
     parser = argparse.ArgumentParser(description="Tractometry pipeline")
     if step is None:
-        parser.add_argument('step', choices=['association'], help='Processing step')
-    parser.add_argument('--model-ref', '-r', required=True, help='Path to the model reference image.')
-    parser.add_argument('--model-bundles', '-b', required=True, help='Path to the model bundles.')
-    parser.add_argument('--model-centroids', '-c', required=True, help='Path to the model centroids.')
-    parser.add_argument('--model-parcellations', '-p', help='Path to the model parcellations.')
+        parser.add_argument('step', choices=['association', 'combine-csv'], help='Processing step')
+    parser.add_argument('--atlas', '-a', required=True, help='Path to the atlas manifest JSON file.')
     parser.add_argument('--subject', '-s', help='Subject ID. Processes all subjects when omitted.')
     parser.add_argument('--db-root', '-d', required=True, help='Path to the BIDS database root.')
     parser.add_argument('--pipeline', default='tractometry', help='Output pipeline name.')
+    parser.add_argument('--mcm-pipeline', default='mcm_tensors_staniz', help='Input MCM derivative pipeline.')
+    parser.add_argument('--bundle-pipeline', default='bundle_seg', help='Input bundle segmentation derivative pipeline.')
+    parser.add_argument('--clustering-method', default='frechet', help='Centroid clustering method.')
+    parser.add_argument('--model-clustering', type=float, default=5.0, help='Clustering threshold passed to the association.')
     parser.add_argument('--n-pts', type=int, default=100, help='Number of points used for association.')
     parser.add_argument('--n-proc', type=int, help='Number of subjects processed in parallel.')
     return parser.parse_args()
@@ -55,7 +64,6 @@ def parse_args(step=None):
 #     bundle_mapping = {}
     
 #     # Scanner les fichiers centroids disponibles
-#     centroid_files = glob.glob(os.path.join(HCP_CENTROIDS_DIR, "*_centroids.vtk"))
     
 #     for centroid_file in centroid_files:
 #         filename = os.path.basename(centroid_file)
@@ -84,7 +92,7 @@ def init_pipeline(subject, pipeline, **kwargs):
     )
     return True
 
-def process_bundle_associations(subject, pipeline, n_pts=50, **kwargs):
+def process_bundle_associations(subject, pipeline, atlas, n_pts=50, **kwargs):
     """
     Traiter toutes les associations de bundles pour un sujet.
     
@@ -95,8 +103,7 @@ def process_bundle_associations(subject, pipeline, n_pts=50, **kwargs):
     pipeline : str
         Nom du pipeline
     """
-    # Obtenir le mapping des bundles
-    bundle_mapping = get_HCP_bundle_names()
+    atlas.require("centroids")
     
     # Obtenir tous les fichiers VTK de la pipeline mcm_to_hcp_space
     vtk_files = subject.get(
@@ -117,11 +124,11 @@ def process_bundle_associations(subject, pipeline, n_pts=50, **kwargs):
         entities = vtk_file.get_entities()
         bundle_name = entities.get('bundle', '')
         
-        if bundle_name in bundle_mapping:
-            hcp_bundle_name = bundle_mapping[bundle_name]
-            centroid_path = os.path.join(HCP_CENTROIDS_DIR, f'summed_{hcp_bundle_name}_centroids.vtk')
+        if bundle_name:
+            atlas_bundle_name = _atlas_bundle_name(atlas, bundle_name)
+            centroid_path = atlas.centroids_dir / f'summed_{atlas_bundle_name}_centroids.vtk'
             
-            model_bundle_path = os.path.join(HCP_FULL_BUNDLE_DIR, f'summed_{hcp_bundle_name}.vtk')
+            model_bundle_path = atlas.bundles_dir / f'summed_{atlas_bundle_name}.vtk'
             print(f"Traitement du bundle {bundle_name} avec centroids {centroid_path}")
             
             try:
@@ -129,9 +136,9 @@ def process_bundle_associations(subject, pipeline, n_pts=50, **kwargs):
                 start_time = time.time()
                 res_dict = associate_subject_to_centroids(
                     subject_bundle=vtk_file,
-                    model_centroids_path=centroid_path,
-                    model_full_bundle_path=model_bundle_path,
-                    reference_nifti=HCP_REFERENCE,
+                    model_centroids_path=str(centroid_path),
+                    model_full_bundle_path=str(model_bundle_path),
+                    reference_nifti=str(atlas.reference),
                     n_pts=n_pts,
                     **kwargs
                 )
@@ -152,7 +159,16 @@ def process_bundle_associations(subject, pipeline, n_pts=50, **kwargs):
         else:
             print(f"Pas de centroids trouvés pour le bundle {bundle_name}")
 
-def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_method='frechet',mcm_pipeline='mcm_tensors_staniz', model_clustering=5.0, **kwargs):
+def bundle_association_multiclusters(
+    subject,
+    pipeline,
+    n_pts='2mm',
+    clustering_method='frechet',
+    mcm_pipeline='mcm_tensors_staniz',
+    bundle_pipeline='bundle_seg',
+    model_clustering=5.0,
+    **kwargs,
+):
     """
     Traiter toutes les associations de bundles pour un sujet.
     
@@ -163,9 +179,6 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
     pipeline : str
         Nom du pipeline
     """
-    # Obtenir le mapping des bundles
-    bundle_mapping = get_HCP_bundle_names()
-
     vtk_files = subject.get(
         pipeline=mcm_pipeline,
         extension='vtk',
@@ -174,17 +187,11 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
     #Sort les fichiers par nom de bundle
     vtk_files.sort(key=lambda x: x.get_entities().get('bundle', ''))
     
-    if len(vtk_files) > 71:
-        print(f"Subject {subject.sub_id} has more than 71 VTK files in {mcm_pipeline}, skipping association to avoid duplicates.")
-        return
-    
     ref_anat = subject.get_unique(
         pipeline='preprocessing',
         metric='FA',
         extension='nii.gz'
     )
-
-    pipeline="tractometry"#pipeline+'_'+mcm_pipeline+'_'+clustering_method
 
     print(f"Trouvé {len(vtk_files)} fichiers VTK pour le sujet {subject.sub_id}")
     # vtk_files = [vtk_file for vtk_file in vtk_files if vtk_file.get_entities().get('bundle', '') == 'CC1']
@@ -193,15 +200,23 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
         entities = vtk_file.get_entities()
         bundle_name = entities.get('bundle', '')
         
-        if bundle_name in bundle_mapping:
-            hcp_bundle_name = bundle_mapping[bundle_name]
-            centroid = subject.get_unique(
-                pipeline='bundle_seg',clustering=clustering_method,
-                bundle=bundle_name)
+        if bundle_name:
+            try:
+                centroid = subject.get_unique(
+                    pipeline=bundle_pipeline,
+                    clustering=clustering_method,
+                    bundle=bundle_name,
+                )
+                model_bundle = subject.get_unique(
+                    pipeline=bundle_pipeline,
+                    suffix='tracto',
+                    datatype='atlas',
+                    bundle=bundle_name,
+                )
+            except (FileNotFoundError, ValueError, IndexError) as error:
+                print(f"Centroid or atlas bundle unavailable for {bundle_name}: {error}")
+                continue
             centroid_path = centroid.path
-            model_bundle = subject.get_unique(
-                pipeline='bundle_seg',suffix='tracto',datatype='atlas',
-                bundle=bundle_name)
             model_bundle_path = model_bundle.path
             print(f"Traitement du bundle {bundle_name} avec centroids {centroid_path}, full bundle {model_bundle_path}")
             
@@ -238,9 +253,13 @@ def bundle_association_multiclusters(subject, pipeline, n_pts='2mm', clustering_
         else:
             print(f"Pas de centroids trouvés pour le bundle {bundle_name}")
 
-def bundle_association_parcellation(subject, pipeline, parcellations_dir=HCP_PARC,mcm_pipeline='mcm_tensors_staniz', **kwargs):
-    bundle_dict=get_HCP_bundle_names()
-    bundle_parc_dict={first_match(f, bundle_dict.values()).replace('_',''):f for f in os.listdir(parcellations_dir) if f.endswith('.nii.gz')}
+def bundle_association_parcellation(subject, pipeline, atlas, mcm_pipeline='mcm_tensors_staniz', **kwargs):
+    atlas.require("parcellations")
+    bundle_parc_dict = {
+        first_match(filename, [atlas.bundle_name(name) for name in atlas.bundle_mapping or {}]).replace('_', ''): filename
+        for filename in os.listdir(atlas.parcellations_dir)
+        if filename.endswith('.nii.gz')
+    }
     print("Bundle parcellation dict:", bundle_parc_dict)
     vtk_files = subject.get(pipeline=mcm_pipeline,
         extension='vtk',
@@ -275,12 +294,12 @@ def bundle_association_parcellation(subject, pipeline, parcellations_dir=HCP_PAR
         if bundle not in bundle_parc_dict:
             print(f"No parcellation found for bundle {bundle}, skipping")
             continue
-        parcellation_path=os.path.join(parcellations_dir,bundle_parc_dict[bundle])
+        parcellation_path = atlas.parcellations_dir / bundle_parc_dict[bundle]
         print(f"Using parcellation {parcellation_path} for bundle {bundle}")
         try:
             res_dict=associate_subject_to_parcellation(
                 subject_bundle=vtk_file,
-                parcellation=parcellation_path,
+                parcellation=str(parcellation_path),
                 subject_reference_nifti=ref_img.path,
                 transform_list=transform_list,
                 **kwargs
@@ -358,7 +377,7 @@ def combine_csv(subject, pipeline):
 
 
 
-def get_central_line_displacement(subject, pipeline=pipeline):
+def get_central_line_displacement(subject, atlas, pipeline=pipeline):
     """
     Compute the MDF between the subject's bundles after HCP association and the HCP centroids.
     Parameters
@@ -377,8 +396,7 @@ def get_central_line_displacement(subject, pipeline=pipeline):
     if not isinstance(subject, Subject):
         subject = Subject(subject)
     
-    # Obtenir le mapping des bundles
-    bundle_mapping = get_HCP_bundle_names()
+    atlas.require("centroids")
     
     # Obtenir tous les fichiers VTK de la pipeline hcp_association
     vtk_files = subject.get(
@@ -395,9 +413,9 @@ def get_central_line_displacement(subject, pipeline=pipeline):
         entities = vtk_file.get_entities()
         bundle_name = entities.get('bundle', '')
         
-        if bundle_name in bundle_mapping:
-            hcp_bundle_name = bundle_mapping[bundle_name]
-            centroid_path = os.path.join(HCP_CENTROIDS_DIR, f'summed_{hcp_bundle_name}_centroids.vtk')
+        if bundle_name:
+            atlas_bundle_name = _atlas_bundle_name(atlas, bundle_name)
+            centroid_path = atlas.centroids_dir / f'summed_{atlas_bundle_name}_centroids.vtk'
             
             try:
                 from dipy.tracking.distances import bundles_distances_mdf
@@ -405,7 +423,7 @@ def get_central_line_displacement(subject, pipeline=pipeline):
                 
                 # Charger les streamlines
                 subject_streamlines = load_vtk_streamlines(vtk_file.path)
-                centroid_streamlines = load_vtk_streamlines(centroid_path)
+                centroid_streamlines = load_vtk_streamlines(str(centroid_path))
                 
                 subject_streamlines = set_number_of_points(subject_streamlines, 24)
                 centroid_streamlines = set_number_of_points(centroid_streamlines, 24)
@@ -494,7 +512,17 @@ def compute_stats_vtk(subject,pipeline):
 
 
 
-def process_hcp_association(subject,pipeline=pipeline,n_pts=50):
+def process_hcp_association(
+    subject,
+    atlas,
+    pipeline=pipeline,
+    n_pts=50,
+    pipeline_list=None,
+    mcm_pipeline='mcm_tensors_staniz',
+    bundle_pipeline='bundle_seg',
+    clustering_method=CLUSTERING,
+    model_clustering=5.0,
+):
     """
     Process the HCP association pipeline on the given subject.
     
@@ -513,7 +541,7 @@ def process_hcp_association(subject,pipeline=pipeline,n_pts=50):
     else:
         n_pts=[int(x.replace('pts','')) for x in pipeline.split('_') if 'pts' in x][0]
     # Define processing steps
-    pipeline_list = [
+    pipeline_list = pipeline_list or [
         # 'init',
         # 'bundle_associations',
         'bundle_association_multiclusters',
@@ -526,27 +554,45 @@ def process_hcp_association(subject,pipeline=pipeline,n_pts=50):
     # Process each requested pipeline step
     step_mapping = {
         'init': lambda: init_pipeline(subject, pipeline),
-        'bundle_associations': lambda: process_bundle_associations(subject, pipeline,n_pts=n_pts),
-        'bundle_association_multiclusters': lambda: bundle_association_multiclusters(subject, pipeline,n_pts=n_pts,clustering_method=CLUSTERING,mcm_pipeline='mcm_tensors_staniz',model_clustering=5.0),
-        'bundle_association_parcellation': lambda: bundle_association_parcellation(subject, pipeline='hcp_association_parcellation',mcm_pipeline='mcm_tensors_staniz_with_AIC'),
+        'bundle_associations': lambda: process_bundle_associations(subject, pipeline, atlas, n_pts=n_pts),
+        'bundle_association_multiclusters': lambda: bundle_association_multiclusters(
+            subject,
+            pipeline,
+            n_pts=n_pts,
+            clustering_method=clustering_method,
+            mcm_pipeline=mcm_pipeline,
+            bundle_pipeline=bundle_pipeline,
+            model_clustering=model_clustering,
+        ),
+        'bundle_association_parcellation': lambda: bundle_association_parcellation(subject, pipeline=pipeline, atlas=atlas, mcm_pipeline=mcm_pipeline),
         'compute_stats_vtk': lambda: compute_stats_vtk(subject, pipeline),
-        'combine_csv': lambda: combine_csv(subject, pipeline='hcp_association_100pts_mcm_tensors_staniz'),
-        'central_line_displacement': lambda: get_central_line_displacement(subject, pipeline)
+        'combine_csv': lambda: combine_csv(subject, pipeline=pipeline),
+        'central_line_displacement': lambda: get_central_line_displacement(subject, atlas, pipeline)
     }
     
-    for step in pipeline_list:
+    for index, step in enumerate(pipeline_list):
         if step in step_mapping:
             print(f"Running step: {step}")
             step_mapping[step]()
-            # Refresh the subject object to ensure it has the latest data
-            subject = Subject(subject.sub_id, db_root=subject.db_root)
+            # Refresh the subject object only when a following step needs its outputs.
+            if index < len(pipeline_list) - 1:
+                subject = Subject(subject.sub_id, db_root=subject.db_root)
 
 
-def process_one_subject(sub):
+def process_one_subject(job):
     try:
-        subject = ds.get_subject(sub)
+        sub, dataset_root, pipeline_name, n_pts, atlas, pipeline_list, options = job
+        dataset = Dataset(dataset_root)
+        subject = dataset.get_subject(sub)
         print(f"Processing subject: {sub}")
-        process_hcp_association(subject, pipeline=args.pipeline, n_pts=args.n_pts)
+        process_hcp_association(
+            subject,
+            atlas=atlas,
+            pipeline=pipeline_name,
+            n_pts=n_pts,
+            pipeline_list=pipeline_list,
+            **options,
+        )
     except Exception as e:
         print(f"Erreur lors du traitement du sujet {sub}: {e}")
         import traceback
@@ -554,27 +600,10 @@ def process_one_subject(sub):
         return
 
 def association():
-    args = parse_args('association')
-    HCP_REFERENCE = args.model_ref
-    HCP_FULL_BUNDLE_DIR = args.model_bundles
-    HCP_CENTROIDS_DIR = args.model_centroids
-    if args.model_parcellations:
-        HCP_PARC = args.model_parcellations
-
-if __name__ == "__main__":
     args = parse_args()
-
-    HCP_REFERENCE = args.model_ref
-    HCP_FULL_BUNDLE_DIR = args.model_bundles
-    HCP_CENTROIDS_DIR = args.model_centroids
-    if args.model_parcellations:
-        HCP_PARC = args.model_parcellations
-
-    # If hostname is calcarine, set tempdir to /local/ndecaux/tmp.
+    atlas = load_atlas_config(args.atlas)
     n_proc = args.n_proc or 8
-    if os.uname()[1] == 'calcarine':
-        tempfile.tempdir = '/local/ndecaux/tmp'
-        n_proc = args.n_proc or 20
+    mark_tractometry_derivative(args.db_root, args.pipeline)
 
     config, tools = set_config()
     print("HCP Association pipeline : ", args.pipeline)
@@ -586,9 +615,21 @@ if __name__ == "__main__":
     print("=====================================")
     
     subject_ids = [args.subject] if args.subject else ds.subject_ids
-    if args.step == 'association':
-        # Use multiprocessing to process subjects in parallel.
-        with multiprocessing.Pool(n_proc) as pool:
-            pool.map(process_one_subject, subject_ids)
+    pipeline_list = ['combine_csv'] if args.step == 'combine-csv' else None
+    options = {
+        'mcm_pipeline': args.mcm_pipeline,
+        'bundle_pipeline': args.bundle_pipeline,
+        'clustering_method': args.clustering_method,
+        'model_clustering': args.model_clustering,
+    }
+    jobs = [
+        (subject_id, args.db_root, args.pipeline, args.n_pts, atlas, pipeline_list, options)
+        for subject_id in subject_ids
+    ]
+    with multiprocessing.Pool(n_proc) as pool:
+        pool.map(process_one_subject, jobs)
     print("HCP Association pipeline completed")
+
+if __name__ == "__main__":
+    association()
 

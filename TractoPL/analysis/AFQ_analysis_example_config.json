@@ -24,7 +24,7 @@
     "AFQ_NPERM": 1000,
     "CORRECT_MULTI_TRACT": false,
     "MULTIPROCESSING": true,
-    "MISSING_SUBJECTS_TOLERANCE": 1,
+    "MISSING_SUBJECTS_TOLERANCE": 0,
     "INTERPOLATE_MISSING_POINTS": 2,
     "METRIC_COLUMNS_CANDIDATES": ["FA", "IFW"],
     "STAT_TYPES": ["mean", "median"],
@@ -33,6 +33,5 @@
         "group": ["hc"]
     },
     "additional_info_path": null,
-    "actimetry_path": null,
     "output_dir": null
 }

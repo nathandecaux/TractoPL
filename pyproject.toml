@@ -2,14 +2,37 @@
 name = "TractoPL"
 version = "0.1.0"
 description = "Tractometry processing library for diffusion MRI data."
-authors = ["Votre Nom <votre.email@example.com>"]
+authors = ["Nathan Decaux <nathan.decaux@hotmail.fr>"]
 license = "MIT"
 packages = [
     { include = "TractoPL" }
 ]
+include = ["TractoPL/config_profiles/*.json"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
+click = "*"
+antspyx = "*"
+dipy = "*"
+matplotlib = "*"
+nibabel = "*"
+numpy = "*"
+pandas = "*"
+pydicom = "*"
+scipy = "*"
+shapely = "*"
+SimpleITK = "*"
+tqdm = "*"
+vtk = "*"
+lpqtree = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+
+[tool.poetry.group.dashboard.dependencies]
+plotly = "*"
+statsmodels = "*"
+streamlit = "*"
 
 [tool.poetry.scripts]
 tractopl-apply-trans-to-vtk = "TractoPL.scripts.apply_trans_to_vtk:main"
@@ -17,6 +40,12 @@ tractopl-convert-tractogram = "TractoPL.scripts.convert_tractogram:main"
 tractopl-frechet-clustering = "TractoPL.atlasing.frechet_clustering:main"
 tractopl-generate-centroid = "TractoPL.atlasing.generate_centroid:main"
 tractopl-afq-analysis = "TractoPL.analysis.AFQ_analysis:main"
+tractopl-preprocessing = "TractoPL.pipeline.preprocessing:cli"
+tractopl-msmt-csd = "TractoPL.pipeline.msmt_csd:process_subject"
+tractopl-mcm = "TractoPL.pipeline.mcm:cli"
+tractopl-bundle-seg = "TractoPL.pipeline.bundle_seg:main"
+tractopl-tractometry = "TractoPL.pipeline.tractometry:association"
+tractopl-connectome = "TractoPL.pipeline.connectome:cli"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

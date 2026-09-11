@@ -21,6 +21,15 @@ import multiprocessing  # Ajout de multiprocessing
 import traceback
 import click
 
+
+def _bundle_names(subject, bundle_name, pipeline, datatype='tracto'):
+    if bundle_name != "ALL":
+        return bundle_name if isinstance(bundle_name, list) else [bundle_name]
+    bundles = subject.get(pipeline=pipeline, datatype=datatype, suffix='tracto')
+    return sorted(
+        {bundle.get_entities().get('bundle') for bundle in bundles if bundle.get_entities().get('bundle')}
+    )
+
 def get_dwi_data(subject):
     """Helper function to get DWI data for a subject"""
     dwi = subject.get_unique(suffix='dwi', desc='preproc',
@@ -103,17 +112,12 @@ def mcm_to_bundleseg_tracts(subject, pipeline, bundle_name,bundle_pipeline='bund
     reference = subject.get(
         metric='FA', pipeline='preprocessing', datatype='dwi', extension='nii.gz')[0]
 
-    if bundle_name == "ALL":
-        bundle_list = list(get_HCP_bundle_names().keys())
-    elif isinstance(bundle_name, list):
-        bundle_list = bundle_name
-    else:
-        bundle_list = [bundle_name]
+    bundle_list = _bundle_names(subject, bundle_name, bundle_pipeline)
 
     already_done = subject.get(suffix='tracto',
                                pipeline=pipeline, extension='vtk')
     if len(already_done) > 0 and not overwrite:
-        already_done = [subject.get_full_entities()['bundle'] for subject in already_done]
+        already_done = [output.get_full_entities()['bundle'] for output in already_done]
         print(f"Already done: {already_done}")
         bundle_list = list(set(bundle_list) - set(already_done))
 
@@ -186,17 +190,12 @@ def mcm_to_bundleseg_tracts_full(subject, pipeline, bundle_name, **kwargs):
     reference = subject.get(
         metric='FA', pipeline='preprocessing', datatype='dwi', extension='nii.gz')[0]
 
-    if bundle_name == "ALL":
-        bundle_list = list(get_HCP_bundle_names().keys())
-    elif isinstance(bundle_name, list):
-        bundle_list = bundle_name
-    else:
-        bundle_list = [bundle_name]
+    bundle_list = _bundle_names(subject, bundle_name, 'bundle_seg')
 
     already_done = subject.get(suffix='tracto',
                                pipeline=pipeline, extension='vtk',desc='full')
     if len(already_done) > 0 and not overwrite:
-        already_done = [subject.get_full_entities()['bundle'] for subject in already_done]
+        already_done = [output.get_full_entities()['bundle'] for output in already_done]
         print(f"Already done: {already_done}")
         bundle_list = list(set(bundle_list) - set(already_done))
 
@@ -205,7 +204,7 @@ def mcm_to_bundleseg_tracts_full(subject, pipeline, bundle_name, **kwargs):
         #         f"Already done: {len(already_done)} bundles. Skipping.")
         #     return True
 
-    for bundle_name in ['CSTleft']:#bundle_list:
+    for bundle_name in bundle_list:
         # #Empty the temp directories
         # for f in glob.glob(os.path.join(tempfile.gettempdir(), '*')):
         #     try:
@@ -268,17 +267,12 @@ def get_mcm_metrics(subject, pipeline,bundle_name='ALL', **kwargs):
     else:
         overwrite = False
     
-    if bundle_name == "ALL":
-        bundle_list = list(get_HCP_bundle_names().keys())
-    elif isinstance(bundle_name, list):
-        bundle_list = bundle_name
-    else:
-        bundle_list = [bundle_name]
+    bundle_list = _bundle_names(subject, bundle_name, pipeline, datatype='mat')
 
     already_done = subject.get(suffix='tracto',
                                pipeline=pipeline, extension='vtk',desc='full')
     if len(already_done) > 0 and not overwrite:
-        already_done = [subject.get_full_entities()['bundle'] for subject in already_done]
+        already_done = [output.get_full_entities()['bundle'] for output in already_done]
         print(f"Already done: {already_done}")
         bundle_list = list(set(bundle_list) - set(already_done))
     
@@ -286,7 +280,7 @@ def get_mcm_metrics(subject, pipeline,bundle_name='ALL', **kwargs):
 
     reference = subject.get(metric='FA', pipeline='preprocessing', datatype='dwi', extension='nii.gz')[0]
 
-    for bundle_name in ['CSTleft']:#bundle_list:
+    for bundle_name in bundle_list:
         # #Empty the temp directories
         # for f in glob.glob(os.path.join(tempfile.gettempdir(), '*')):
         #     try:
@@ -347,12 +341,7 @@ def mcm_to_hcp_bundles(subject, pipeline, bundle_name='ALL', **kwargs):
     reference = subject.get(
         metric='FA', pipeline='preprocessing', datatype='dwi', extension='nii.gz')[0]
 
-    if bundle_name == "ALL":
-        bundle_list = list(get_HCP_bundle_names().keys())
-    elif isinstance(bundle_name, list):
-        bundle_list = bundle_name
-    else:
-        bundle_list = [bundle_name]
+    bundle_list = _bundle_names(subject, bundle_name, 'bundle_seg')
 
     already_done = subject.get(suffix='tracto',
                                desc='cleaned',pipeline=pipeline, extension='vtk')
@@ -498,7 +487,13 @@ def create_fake_mcm_from_dti(subject, pipeline='fake_mcm_dti'):
 #     return True
 
 
-def process_mcm_pipeline(subject, pipeline='mcm_tensors',pipeline_list=None):
+def process_mcm_pipeline(
+    subject,
+    pipeline='mcm_tensors',
+    pipeline_list=None,
+    estimation_options=None,
+    bundle_pipeline='bundle_seg',
+):
     """
     Process the MSMT-CSD pipeline on the given subject.
 
@@ -524,32 +519,52 @@ def process_mcm_pipeline(subject, pipeline='mcm_tensors',pipeline_list=None):
 
         ]
 
+    estimation_options = estimation_options or {
+        'R': True,
+        'c': 3,
+        'n': 3,
+        'F': True,
+        'ml_mode': CLIArg('ml-mode', 2),
+        'opt': CLIArg('optimizer', 'levenberg'),
+    }
+
     # Process each requested pipeline step
     step_mapping = {
         'init': lambda: init_pipeline(subject, pipeline),
-        'mcm_estimation': lambda: process_mcm_estimation(subject, pipeline, R=True, c=3, n=3, F=True,
-                                                         ml_mode=CLIArg(
-                                                             'ml-mode', 2),
-                                                         opt=CLIArg(
-                                                             'optimizer', 'levenberg')
-                                                         ),
+        'mcm_estimation': lambda: process_mcm_estimation(
+            subject, pipeline, **estimation_options
+        ),
             'create_fake_mcm_from_dti': lambda: create_fake_mcm_from_dti(subject, pipeline),
-        'mcm_to_bundleseg_tracts': lambda: mcm_to_bundleseg_tracts(subject, pipeline, bundle_name='ALL',overwrite=False,bundle_pipeline='bundle_seg'),
+        'mcm_to_bundleseg_tracts': lambda: mcm_to_bundleseg_tracts(
+            subject,
+            pipeline,
+            bundle_name='ALL',
+            overwrite=False,
+            bundle_pipeline=bundle_pipeline,
+        ),
         'mcm_to_bundleseg_tracts_full': lambda: mcm_to_bundleseg_tracts_full(subject, pipeline, bundle_name='ALL',overwrite=True),
         'mcm_to_hcp_bundles': lambda: mcm_to_hcp_bundles(subject, pipeline, overwrite=True),
         'get_mcm_metrics': lambda: get_mcm_metrics(subject, pipeline,bundle_name='ALL', overwrite=True),
     }
 
-    for step in pipeline_list:
+    for index, step in enumerate(pipeline_list):
         if step in step_mapping:
             print(f"Running step: {step}")
             step_mapping[step]()
 
-            subject = Subject(subject.sub_id, db_root=subject.db_root)
+            if index < len(pipeline_list) - 1:
+                subject = Subject(subject.sub_id, db_root=subject.db_root)
 
 
 
-def process_subject(sub, dataset_path, pipeline_name,pipeline_list=None):
+def process_subject(
+    sub,
+    dataset_path,
+    pipeline_name,
+    pipeline_list=None,
+    estimation_options=None,
+    bundle_pipeline='bundle_seg',
+):
     """
     Process a single subject - worker function for multiprocessing.
 
@@ -562,11 +577,6 @@ def process_subject(sub, dataset_path, pipeline_name,pipeline_list=None):
     pipeline_name : str
         Pipeline name to use
     """
-    # Set temporary directory if on calcarine
-    if os.uname()[1] == 'calcarine':
-        tempfile.tempdir = '/local/ndecaux/tmp'
-    
-
     # Initialize subject
     ds = Dataset(dataset_path)
     subject = ds.get_subject(sub)
@@ -578,7 +588,13 @@ def process_subject(sub, dataset_path, pipeline_name,pipeline_list=None):
 
     print(f"Processing subject: {sub}")
     try:
-        process_mcm_pipeline(subject, pipeline=pipeline_name, pipeline_list=pipeline_list)
+        process_mcm_pipeline(
+            subject,
+            pipeline=pipeline_name,
+            pipeline_list=pipeline_list,
+            estimation_options=estimation_options,
+            bundle_pipeline=bundle_pipeline,
+        )
     except Exception as e:
         print(f"Error processing subject {sub}: {e}")
         print(f"Full traceback:\n{traceback.format_exc()}")
@@ -590,22 +606,49 @@ def process_subject(sub, dataset_path, pipeline_name,pipeline_list=None):
     
 @click.command()
 @click.argument('step', type=click.Choice(['estimation','projection'], case_sensitive=False))
-@click.option('--subject', prompt='Subject ID', help='The subject ID to preprocess.')
-@click.option('--db_root', prompt='Database root', help='Root directory of the BIDS database.')
-def cli(step,subject, db_root):
+@click.option('--subject', required=True, help='Subject ID to process.')
+@click.option('--db-root', required=True, help='Root directory of the BIDS database.')
+@click.option('--pipeline', default='mcm_tensors', show_default=True, help='Derivative pipeline name.')
+@click.option('--bundle-pipeline', default='bundle_seg', show_default=True, help='Input bundle derivative pipeline.')
+@click.option('--n-comparts', type=click.IntRange(1), default=3, show_default=True, help='Number of anisotropic compartments.')
+@click.option('--tensor-model', 'tensor_model', type=click.IntRange(1), default=3, show_default=True, help='Anisotropic tensor model.')
+@click.option('--free-water/--no-free-water', default=True, show_default=True, help='Estimate a free-water compartment.')
+@click.option('--model-selection', is_flag=True, help='Select the MCM model with AIC instead of a fixed compartment count.')
+@click.option('--ml-mode', type=click.IntRange(0), default=2, show_default=True, help='Anima maximum-likelihood fitting mode.')
+@click.option('--optimizer', default='levenberg', show_default=True, help='Anima optimizer name.')
+def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_model,
+    free_water, model_selection, ml_mode, optimizer):
     """
     Command-line interface for processing a single subject.
     """
     dataset_path = db_root
-    pipeline_name = 'mcm_tensors'
+    pipeline_name = pipeline
     if step == 'estimation':
         pipeline_list = ['mcm_estimation']
+        estimation_options = {
+            'R': True,
+            'c': tensor_model,
+            'F': free_water,
+            'ml_mode': CLIArg('ml-mode', ml_mode),
+            'opt': CLIArg('optimizer', optimizer),
+        }
+        if model_selection:
+            estimation_options['M'] = True
+        else:
+            estimation_options['n'] = n_comparts
     elif step == 'projection':
         pipeline_list = ['mcm_to_bundleseg_tracts']
-    process_subject(subject, dataset_path, pipeline_name, pipeline_list=pipeline_list)
+        estimation_options = None
+    process_subject(
+        subject,
+        dataset_path,
+        pipeline_name,
+        pipeline_list=pipeline_list,
+        estimation_options=estimation_options,
+        bundle_pipeline=bundle_pipeline,
+    )
 
 
 
 if __name__ == "__main__":
-    config, tools = set_config()
     cli()

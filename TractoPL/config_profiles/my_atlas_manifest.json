@@ -1,0 +1,10 @@
+{
+  "name": "MyHCP105",
+  "reference": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz",
+  "bundles_dir": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/vtk_with_sub_id/clustered",
+  "centroids_dir": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/vtk_with_sub_id/clustered/here",
+  "parcellations_dir": "parcellations",
+  "bundle_mapping": {
+    "CSTleft": "CST_left"
+  }
+}
