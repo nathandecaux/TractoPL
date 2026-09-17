@@ -46,6 +46,8 @@ tractopl-mcm = "TractoPL.pipeline.mcm:cli"
 tractopl-bundle-seg = "TractoPL.pipeline.bundle_seg:main"
 tractopl-tractometry = "TractoPL.pipeline.tractometry:association"
 tractopl-connectome = "TractoPL.pipeline.connectome:cli"
+tractopl-quickbundle="TractoPL.scripts.quickbundle:main"
+tractosearch_nearest_in_radius = "TractoPL.scripts.tractosearch_nearest_in_radius:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

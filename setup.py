@@ -23,6 +23,7 @@ setup(
             'tractopl-bundle-seg=TractoPL.pipeline.bundle_seg:main',
             'tractopl-tractometry=TractoPL.pipeline.tractometry:association',
             'tractopl-connectome=TractoPL.pipeline.connectome:cli',
+            'tractopl-quickbundle=TractoPL.scripts.quickbundle:main',
         ],
     },
     install_requires=[

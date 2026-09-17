@@ -127,7 +127,7 @@ development: the local checkout is mounted at runtime, so Python changes are
 used immediately and rebuilding the image is unnecessary.
 
 ```shell
-export APPTAINER_TMPDIR=/path/to/scratch/dir  # e.g. /local/$USER/apptainer-tmp
+export APPTAINER_TMPDIR=/path/to/scratch/dir  # e.g. /home/$USER/apptainer-tmp
 mkdir -p "$APPTAINER_TMPDIR"
 apptainer build --fakeroot tractopl-dev.sif apptainer/TractoPL-dev.def
 bash examples/run_workflow_apptainer_dev.sh \
@@ -150,19 +150,19 @@ development image.
 
 The package installs the following maintained commands:
 
-| Command | Purpose |
-| --- | --- |
-| `tractopl-preprocessing` | Preprocess DWI, fit DTI, and compute FA. |
-| `tractopl-msmt-csd` | Generate responses, FODs, fixels, and tractography. |
-| `tractopl-mcm` | Fit MCM or project MCM metrics onto bundle tractograms. |
-| `tractopl-bundle-seg` | Register the atlas and segment bundles. |
-| `tractopl-tractometry` | Associate metrics to centroids or combine CSV files. |
-| `tractopl-connectome` | Compute bundle density metrics. |
-| `tractopl-generate-centroid` | Generate a centroid VTK from one tractogram. |
-| `tractopl-frechet-clustering` | Generate centroid clusters with Fréchet distances. |
-| `tractopl-apply-trans-to-vtk` | Apply a transform to a VTK tractogram. |
-| `tractopl-convert-tractogram` | Convert a tractogram format. |
-| `tractopl-afq-analysis` | Run configuration-driven AFQ analysis. |
+| Command                         | Purpose                                                 |
+| ------------------------------- | ------------------------------------------------------- |
+| `tractopl-preprocessing`      | Preprocess DWI, fit DTI, and compute FA.                |
+| `tractopl-msmt-csd`           | Generate responses, FODs, fixels, and tractography.     |
+| `tractopl-mcm`                | Fit MCM or project MCM metrics onto bundle tractograms. |
+| `tractopl-bundle-seg`         | Register the atlas and segment bundles.                 |
+| `tractopl-tractometry`        | Associate metrics to centroids or combine CSV files.    |
+| `tractopl-connectome`         | Compute bundle density metrics.                         |
+| `tractopl-generate-centroid`  | Generate a centroid VTK from one tractogram.            |
+| `tractopl-frechet-clustering` | Generate centroid clusters with Fréchet distances.     |
+| `tractopl-apply-trans-to-vtk` | Apply a transform to a VTK tractogram.                  |
+| `tractopl-convert-tractogram` | Convert a tractogram format.                            |
+| `tractopl-afq-analysis`       | Run configuration-driven AFQ analysis.                  |
 
 Typical commands for one participant are:
 
@@ -208,7 +208,7 @@ tractometry derivative name:
 
 ```shell
 tractopl-afq-analysis -c analysis_config.json \
-  --subjects-table /data/my-bids-dataset/participants.tsv \
+  --subjects-table /data/my-bids-dataset/participants.xlsx \
   --output-dir /data/my-bids-dataset/derivatives/afq-analysis
 ```
 

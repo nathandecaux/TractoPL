@@ -9,6 +9,7 @@ from TractoPL.data.loader import Subject, Dataset
 from TractoPL.data.io import copy2nii, move2nii, copy_list, copy_from_dict
 from TractoPL.utils.tools import del_key, upt_dict, create_pipeline_description, CLIArg,first_match
 from TractoPL.utils.clustering import associate_subject_to_centroids, get_stat_from_association_file,associate_subject_to_parcellation
+from TractoPL.pipeline.bundle_seg import _apply_trans_to_atlas_bundle
 from TractoPL.set_config import get_HCP_bundle_names
 from TractoPL.configuration import AtlasConfig, load_atlas_config
 from dipy.tracking.streamline import set_number_of_points
@@ -23,7 +24,7 @@ import argparse
 # pipeline='hcp_association_multiclusters_umapendpoints'
 pipeline='tractometry'
 
-CLUSTERING='cortex'
+CLUSTERING='centroid'
 TRACTOMETRY_MARKER = '.tag_tractometry'
 
 
@@ -47,7 +48,7 @@ def parse_args(step=None):
     parser.add_argument('--pipeline', default='tractometry', help='Output pipeline name.')
     parser.add_argument('--mcm-pipeline', default='mcm_tensors_staniz', help='Input MCM derivative pipeline.')
     parser.add_argument('--bundle-pipeline', default='bundle_seg', help='Input bundle segmentation derivative pipeline.')
-    parser.add_argument('--clustering-method', default='frechet', help='Centroid clustering method.')
+    parser.add_argument('--clustering-method', default='centroid', help='Centroid clustering method.')
     parser.add_argument('--model-clustering', type=float, default=5.0, help='Clustering threshold passed to the association.')
     parser.add_argument('--n-pts', type=int, default=100, help='Number of points used for association.')
     parser.add_argument('--n-proc', type=int, help='Number of subjects processed in parallel.')
@@ -163,7 +164,7 @@ def bundle_association_multiclusters(
     subject,
     pipeline,
     n_pts='2mm',
-    clustering_method='frechet',
+    clustering_method='centroid',
     mcm_pipeline='mcm_tensors_staniz',
     bundle_pipeline='bundle_seg',
     model_clustering=5.0,
@@ -207,18 +208,18 @@ def bundle_association_multiclusters(
                     clustering=clustering_method,
                     bundle=bundle_name,
                 )
-                model_bundle = subject.get_unique(
-                    pipeline=bundle_pipeline,
-                    suffix='tracto',
-                    datatype='atlas',
-                    bundle=bundle_name,
-                )
+                    # model_bundle = subject.get_unique(
+                    #     pipeline=bundle_pipeline,
+                    #     suffix='tracto',
+                    #     datatype='atlas',
+                    #     bundle=bundle_name,
+                    # )
             except (FileNotFoundError, ValueError, IndexError) as error:
                 print(f"Centroid or atlas bundle unavailable for {bundle_name}: {error}")
                 continue
             centroid_path = centroid.path
-            model_bundle_path = model_bundle.path
-            print(f"Traitement du bundle {bundle_name} avec centroids {centroid_path}, full bundle {model_bundle_path}")
+            # model_bundle_path = model_bundle.path
+            print(f"Traitement du bundle {bundle_name} avec centroids {centroid_path}")
             
             if len(subject.get(pipeline=pipeline, bundle=bundle_name, datatype='metric', suffix='mean'))>0:
                 print(f'Bundle {bundle_name} already exists in {pipeline}, skipping')
@@ -229,7 +230,7 @@ def bundle_association_multiclusters(
                 res_dict = associate_subject_to_centroids(
                     subject_bundle=vtk_file,
                     model_centroids_path=centroid_path,
-                    model_full_bundle_path=model_bundle_path,
+                    # model_full_bundle_path=model_bundle_path,
                     reference_nifti=ref_anat.path,
                     n_pts=n_pts,
                     slr=False,
@@ -252,6 +253,29 @@ def bundle_association_multiclusters(
                 continue
         else:
             print(f"Pas de centroids trouvés pour le bundle {bundle_name}")
+
+def generate_bundle_profile(subject, pipeline, atlas,clustering_method="centroid", mcm_pipeline='mcm_tensors', **kwargs):
+    vtk_files = subject.get(
+            pipeline=mcm_pipeline,
+            extension='vtk',
+            datatype='tracto',
+            bundle=list(atlas.bundle_mapping.keys())
+        )
+
+    vtk_files.sort(key=lambda x: x.get_entities().get('bundle', ''))
+    
+    ref_anat = subject.get_unique(
+        pipeline='preprocessing',
+        metric='FA',
+        extension='nii.gz'
+    )
+    for vtk_file in vtk_files:
+        bundle_name = vtk_file.bundle
+        print(f"Processing bundle {bundle_name} for subject {subject.subject_id}")
+
+        
+
+
 
 def bundle_association_parcellation(subject, pipeline, atlas, mcm_pipeline='mcm_tensors_staniz', **kwargs):
     atlas.require("parcellations")
@@ -534,12 +558,12 @@ def process_hcp_association(
 
     if isinstance(subject, str):
         subject = Subject(subject)
-    if not 'pts' in pipeline and not 'mm' in pipeline:
-        pipeline=pipeline+f'_{n_pts}pts'
-    elif 'mm' in pipeline:
-        n_pts=pipeline.split('_')[-1]
-    else:
-        n_pts=[int(x.replace('pts','')) for x in pipeline.split('_') if 'pts' in x][0]
+    # if not 'pts' in pipeline and not 'mm' in pipeline:
+    #     pipeline=pipeline+f'_{n_pts}pts'
+    # elif 'mm' in pipeline:
+    #     n_pts=pipeline.split('_')[-1]
+    # else:
+    #     n_pts=[int(x.replace('pts','')) for x in pipeline.split('_') if 'pts' in x][0]
     # Define processing steps
     pipeline_list = pipeline_list or [
         # 'init',

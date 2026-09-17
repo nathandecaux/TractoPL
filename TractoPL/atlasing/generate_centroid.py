@@ -19,8 +19,8 @@ def parse_args():
 	parser = argparse.ArgumentParser(
 		description="Generate a VTK centroid from the longest fibers of a tractogram."
 	)
-	parser.add_argument("tractogram", help="Input tractogram (.vtk or .trk)")
-	parser.add_argument("output_vtk", help="Output centroid VTK path")
+	parser.add_argument("tractograms", help="Input tractogram(s) (.vtk or .trk)",nargs="+")
+	parser.add_argument("--out-dir","-o", help="Output folder")
 	parser.add_argument(
 		"--longest-frac",
 		type=float,
@@ -61,14 +61,24 @@ def generate_centroid(tractogram_path, output_vtk_path, longest_frac=0.15, resam
 
 def main():
 	args = parse_args()
-	centroid = generate_centroid(
-		args.tractogram,
-		args.output_vtk,
-		longest_frac=args.longest_frac,
-		resample_points=args.resample_points,
-	)
-	print(f"Centroid saved to {args.output_vtk} ({len(centroid)} points)")
-
+	# centroid = generate_centroid(
+	# 	args.tractograms[0],
+	# 	(Path(args.out_dir) / Path(args.tractograms[0]).stem).with_suffix(".vtk"),
+	# 	longest_frac=args.longest_frac,
+	# 	resample_points=args.resample_points,
+	# )
+	# print(f"Centroid saved to {(Path(args.out_dir) / Path(args.tractograms[0]).stem).with_suffix('.vtk')} ({len(centroid)} points)")
+	for tractogram_path in args.tractograms:
+		output_vtk_path = (Path(args.out_dir) / Path(tractogram_path).stem).with_suffix(".vtk")
+		#Add _centroids to the output filename
+		output_vtk_path = output_vtk_path.with_name(output_vtk_path.stem + "_centroids.vtk")
+		centroid = generate_centroid(
+			tractogram_path,
+			output_vtk_path,
+			longest_frac=args.longest_frac,
+			resample_points=args.resample_points,
+		)
+		print(f"Centroid saved to {output_vtk_path} ({len(centroid)} points)")
 
 if __name__ == "__main__":
 	main()

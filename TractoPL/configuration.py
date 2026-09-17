@@ -21,6 +21,9 @@ class AtlasConfig:
     name: str
     reference: Path
     bundles_dir: Path
+    bundles_pattern: Optional[Path] = None
+    FA: Optional[Path] = None
+    T1: Optional[Path] = None
     centroids_dir: Optional[Path] = None
     parcellations_dir: Optional[Path] = None
     bundle_mapping: Optional[Mapping[str, str]] = None
@@ -40,6 +43,14 @@ class AtlasConfig:
             raise ConfigurationError(
                 f"Atlas '{self.name}' is missing required resources: {', '.join(missing)}"
             )
+
+    #Allow item assignment like a dictionary
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key!='name':
+            object.__setattr__(self, key, Path(value) if isinstance(value, str) else value)
 
 
 def load_atlas_config(path: Union[str, Path]) -> AtlasConfig:
@@ -86,8 +97,11 @@ def load_atlas_config(path: Union[str, Path]) -> AtlasConfig:
         name=data["name"],
         reference=resolve_path("reference", required_path=True),
         bundles_dir=resolve_path("bundles_dir", required_path=True),
+        FA=resolve_path("FA"),
+        T1=resolve_path("T1"),
         centroids_dir=resolve_path("centroids_dir"),
         parcellations_dir=resolve_path("parcellations_dir"),
+        bundles_pattern=resolve_path("bundles_pattern"),
         bundle_mapping=mapping,
     )
 

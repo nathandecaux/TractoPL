@@ -12,11 +12,11 @@ bash examples/run_workflow.sh \
 
 The arguments are:
 
-| Argument | Meaning |
-| --- | --- |
-| `bids-root` | Root directory of the input BIDS dataset. Outputs are written below its `derivatives/` directory. |
-| `atlas-manifest` | Atlas JSON manifest. Relative paths inside it are resolved relative to the manifest file. |
-| `subject-id` | BIDS subject label without the `sub-` prefix, for example `01`. |
+| Argument           | Meaning                                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| `bids-root`      | Root directory of the input BIDS dataset. Outputs are written below its`derivatives/` directory. |
+| `atlas-manifest` | Atlas JSON manifest. Relative paths inside it are resolved relative to the manifest file.          |
+| `subject-id`     | BIDS subject label without the`sub-` prefix, for example `01`.                                 |
 
 ## Prerequisites
 

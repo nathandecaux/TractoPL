@@ -41,6 +41,6 @@ apptainer exec \
     "$image" \
     bash -c '
         set -euo pipefail
-        /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages --quiet -e /opt/tractopl
+        pip install -e /opt/tractopl --no-deps
         exec bash /opt/tractopl/examples/run_workflow.sh "$@"
     ' _ "$dataset_root" "$atlas_manifest" "$subject_id"

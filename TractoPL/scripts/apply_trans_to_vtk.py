@@ -21,11 +21,8 @@ import numpy as np
 import pandas as pd
 from TractoPL.data.vtk_loader import load_vtk_streamlines, save_vtk
 from TractoPL.scripts.convert_tractogram import flip_tractogram
-try:
-    from dipy.io.streamline import load_tractogram, save_tractogram, StatefulTractogram, Space
-    DIPY_AVAILABLE = True
-except ImportError:
-    DIPY_AVAILABLE = False
+from dipy.io.streamline import load_tractogram, save_tractogram, StatefulTractogram, Space
+import vtk
 
 # --------------------------------------------------------------------------------------
 # Coordonnees
@@ -48,8 +45,8 @@ def lps_to_ras(pts):
 
 def load_tractogram_as_points(input_file, moving_image):
     """Charge et aplatit un tractogramme en RASMM, avec les longueurs des streamlines."""
-    if not DIPY_AVAILABLE:
-        raise RuntimeError("dipy requis pour les fichiers tractographie (.tck/.trk)")
+    # if not DIPY_AVAILABLE:
+    #     raise RuntimeError("dipy requis pour les fichiers tractographie (.tck/.trk)")
     sft = load_tractogram(input_file, moving_image, bbox_valid_check=False,
                           trk_header_check=False, to_space=Space.LPSMM)
     streamlines = list(sft.streamlines)
@@ -73,12 +70,13 @@ def reconstruct_streamlines(points, lengths):
 
 def reconstruct_and_save_tractogram(points_world_lps, lengths, fixed_image_path, output_file):
     """Reconstruit et sauvegarde un tractogramme en espace LPSMM de l'image fixed."""
-    if not DIPY_AVAILABLE:
-        raise RuntimeError("dipy requis pour sauvegarder le tractogramme")
-    new_streamlines = reconstruct_streamlines(points_world_lps, lengths)
-    sft_new = StatefulTractogram(new_streamlines, fixed_image_path, Space.LPSMM)
-    save_tractogram(sft_new, output_file, bbox_valid_check=False)
-
+    if output_file.endswith(('.trk', '.tck')):
+        new_streamlines = reconstruct_streamlines(points_world_lps, lengths)
+        sft_new = StatefulTractogram(new_streamlines, fixed_image_path, Space.LPSMM)
+        save_tractogram(sft_new, output_file, bbox_valid_check=False)
+    elif output_file.endswith('.vtk'):
+        save_vtk(reconstruct_streamlines(points_world_lps, lengths), output_file)
+        
 # --------------------------------------------------------------------------------------
 # CSV / ANTs
 # --------------------------------------------------------------------------------------
@@ -218,8 +216,7 @@ def main():
     if input_is_tracto:
         if not args.moving_image or not os.path.exists(args.moving_image):
             print("Erreur: --moving-image existante requise pour une entrée tractographie", file=sys.stderr); sys.exit(1)
-        if not DIPY_AVAILABLE:
-            print("Erreur: dipy requis (pip install dipy)", file=sys.stderr); sys.exit(1)
+
 
     if args.output:
         output_file = args.output
@@ -234,8 +231,6 @@ def main():
     if output_is_tracto:
         if not args.fixed_image or not os.path.exists(args.fixed_image):
             print("Erreur: --fixed-image existante requise pour une sortie tractographie", file=sys.stderr); sys.exit(1)
-        if not DIPY_AVAILABLE:
-            print("Erreur: dipy requis (pip install dipy)", file=sys.stderr); sys.exit(1)
 
     print(f"Entrée: {args.input_vtk}")
     print(f"Transformations: {', '.join(args.transform)}")

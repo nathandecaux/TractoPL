@@ -6,3 +6,4 @@ TractoPL/__pycache__/
 *.sif
 plan.md
 *__pycache__
+TractoPL/config_profiles/my_atlas_manifest.json

@@ -6,6 +6,7 @@ import numpy as np
 from dipy.io.stateful_tractogram import Space, StatefulTractogram
 from dipy.io.streamline import load_tractogram, save_tractogram
 from TractoPL.data.vtk_loader import load_vtk, save_vtk
+
 def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Convert tractograms between formats in batch, with optional orientation flipping (LPS<->RAS)."
@@ -95,6 +96,31 @@ def flip_tractogram(tractogram):
         flipped.append(sl2)
     return flipped
 
+def compute_direction_color_encoding(streamlines):
+    """
+    Compute smooth direction color encoding for a set of streamlines.
+    Returns one RGB color per streamline point, based on centered tangents.
+    """
+    colors = []
+    for sl in streamlines:
+        if len(sl) < 2:
+            colors.append(np.zeros((len(sl), 3), dtype=float))
+            continue
+
+        # Centered differences make adjacent point directions vary smoothly,
+        # unlike forward differences which produce one color per segment.
+        tangents = np.empty_like(sl, dtype=float)
+        tangents[0] = sl[1] - sl[0]
+        tangents[-1] = sl[-1] - sl[-2]
+        if len(sl) > 2:
+            tangents[1:-1] = sl[2:] - sl[:-2]
+
+        norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        tangents /= norms
+        colors.append(np.abs(tangents))
+    return colors
+
 def convert_tractogram(in_path, out_path, ref, flip):
     # Use 'same' for .trk if no reference is provided
     if ref is None and _is_ext(in_path, "vtk") and _is_ext(out_path, "trk"):
@@ -114,7 +140,7 @@ def convert_tractogram(in_path, out_path, ref, flip):
             trk_header_check=False,
             to_space=Space.LPSMM
         )
-        arrays = None
+        arrays = {"direction": compute_direction_color_encoding(tractogram.streamlines)}
 
         if flip:
             tractogram.streamlines = flip_tractogram(tractogram.streamlines)

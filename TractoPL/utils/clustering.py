@@ -266,8 +266,8 @@ def cluster_vtk(vtk_file,reference_file):
 
 def associate_subject_to_centroids(subject_bundle,
                                    model_centroids_path,
-                                   model_full_bundle_path,
                                    reference_nifti,
+                                   model_full_bundle_path=None,
                                    n_pts=50,
                                    temp_dir=None,
                                    slr=True,
@@ -282,8 +282,8 @@ def associate_subject_to_centroids(subject_bundle,
         Fichier VTK contenant les streamlines du sujet à associer
     model_centroids_path : str
         Chemin vers le fichier VTK contenant les centroids du modèle
-    model_full_bundle_path : str
-        Chemin vers le fichier VTK contenant le bundle complet du modèle
+    model_full_bundle_path : str, optional
+        Chemin vers le fichier VTK contenant le bundle complet du modèle (par défaut None)
     reference_nifti : str
         Chemin vers l'image de référence NIfTI
     temp_dir : str, optional
@@ -299,6 +299,9 @@ def associate_subject_to_centroids(subject_bundle,
 
     # Charger les streamlines du sujet
     streamlines, scalar_arrays = load_vtk_streamlines(subject_bundle.path)
+    #Delete non scalar arrays
+    print({k:v[0].__class__.__name__ for k, v in scalar_arrays.items()})
+    scalar_arrays = {k: v for k, v in scalar_arrays.items() if not isinstance(v[0], np.ndarray)}
     centroids, _ = load_vtk_streamlines(model_centroids_path)
 
     slr_n_points= 12
@@ -336,7 +339,7 @@ def associate_subject_to_centroids(subject_bundle,
     print(f"Nombre de centroids du modèle : {len(centroids)}")
 
 
-    if slr:
+    if slr and model_full_bundle_path is not None:
 
         if model_full_bundle_path.endswith('.trk'):
             model_full_bundle_tracto = load_tractogram(model_full_bundle_path,

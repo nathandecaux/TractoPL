@@ -493,7 +493,7 @@ def process_tractosearch(streamlines_file, models_dict, radius=None, **kwargs):
     if radius is None:
         cmd = ['tractosearch_nearest.py']
     else:
-        cmd = ['tractosearch_nearest_in_radius.py']
+        cmd = ['tractosearch_nearest_in_radius']
         cmd.extend(['--mean_distance',str(radius)])
 
 
@@ -526,7 +526,7 @@ def process_tractosearch(streamlines_file, models_dict, radius=None, **kwargs):
     for bundle, model_path in models_dict.items():
         model_path_str = model_path if isinstance(model_path, str) else model_path.path
         model_filename = os.path.basename(model_path_str)
-        matched_trk = [trk for trk in trks if bundle in os.path.basename(trk)]
+        matched_trk = [trk for trk in trks if model_filename in os.path.basename(trk)]
         if len(matched_trk) == 0:
             print(f"No matching tract found for model {model_filename} in output folder {temp_dir}")
             continue

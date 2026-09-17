@@ -8,8 +8,12 @@ from os.path import join as opj
 from TractoPL.data.io import copy2nii, move2nii, parse_filename
 import pandas as pd
 import pickle
-_SENTINEL = object()  # Défini au niveau du module
+from TractoPL.data.vtk_loader import load_vtk, save_vtk
+from dipy.io.streamline import load_trk, save_trk, load_tck, save_tck
+from dipy.io.streamline import load_tractogram, save_tractogram, StatefulTractogram, Space
+from dipy.tracking.streamline import Streamlines
 
+_SENTINEL = object()  # Défini au niveau du module
 
 def _resolve_db_root(db_root):
     """Resolve the dataset root from an argument or the public environment variable."""
@@ -776,6 +780,59 @@ def test():
                 print(f"  - {f}")
     except Exception as e:
         print(f"Erreur pendant l'exécution: {e}")
+
+def load_streamlines(file_path,reference=None,space='LPS'):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    if space not in ['LPS', 'RAS', 'LPSMM','RASMM']:
+        raise ValueError(f"Unsupported space: {space}")
+    else:
+        if 'LPS' in space:
+            space_enum = Space.LPSMM
+        elif 'RAS' in space:
+            space_enum = Space.RASMM
+    if file_path.endswith('.vtk'):
+        streamlines,_ = load_vtk(file_path)
+        return Streamlines(streamlines)
+    elif file_path.endswith('.trk'):
+        if reference is None:
+            reference = "same"
+        return load_trk(file_path, reference=reference,to_space=space_enum).streamlines
+    elif file_path.endswith('.tck'):
+        if reference is None:
+            raise ValueError("Reference must be provided for .tck files")
+        return load_tck(file_path, reference=reference,to_space=space_enum).streamlines
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
+
+def save_streamlines(streamlines, file_path, reference=None, space='LPS',scalar_dict=None):
+    if space not in ['LPS', 'RAS', 'LPSMM','RASMM']:
+        raise ValueError(f"Unsupported space: {space}")
+    else:
+        if 'LPS' in space:
+            space_enum = Space.LPSMM
+        elif 'RAS' in space:
+            space_enum = Space.RASMM
+
+    if file_path.endswith(('.trk', '.tck')):
+        if reference is None and file_path.endswith('.trk'):
+            reference = "same"
+        if reference is None and file_path.endswith('.tck'):
+            raise ValueError("Reference must be provided for .tck files")
+        tractogram=StatefulTractogram(streamlines, reference=reference,space=space_enum)
+    if file_path.endswith('.vtk'):
+        save_vtk(streamlines, file_path,scalar_dict=scalar_dict)
+    elif file_path.endswith('.trk'):
+        save_trk(tractogram, file_path)
+  
+    elif file_path.endswith('.tck'):
+        save_tck(tractogram, file_path)
+      
+
+    
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
 
 if __name__ == "__main__":
     test()

@@ -1,8 +1,12 @@
 {
   "name": "MyHCP105",
   "reference": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz",
-  "bundles_dir": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/vtk_with_sub_id/clustered",
+  "FA": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz",
+  "T1": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_anat.nii.gz",
+  "bundles_dir": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/mini/",
+  "bundles_pattern": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/mini/*{BUNDLE}*.vtk",
   "centroids_dir": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/vtk_with_sub_id/clustered/here",
+  "centroids_pattern": "/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/mini/centroids/*{BUNDLE}*.vtk",
   "parcellations_dir": "parcellations",
   "bundle_mapping": {
     "CSTleft": "CST_left"
