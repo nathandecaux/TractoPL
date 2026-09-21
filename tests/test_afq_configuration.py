@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from TractoPL.analysis.AFQ_analysis import load_config, validate_config
+from TractoPL.analysis.population_analysis import load_config, validate_config
 
 
 def test_afq_config_requires_an_existing_dataset(tmp_path):

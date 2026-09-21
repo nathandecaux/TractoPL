@@ -23,7 +23,7 @@ from scipy import stats
 from scipy.stats import f as f_dist
 from scipy.interpolate import interp1d
 import statsmodels.api as sm
-from TractoPL.analysis.AFQ_analysis import interpolate_missing_points, resample_bundle_data
+from TractoPL.analysis.population_analysis import interpolate_missing_points, resample_bundle_data
 
 def get_dataset_paths(dataset_path: str) -> dict:
     """Return conventional optional metadata paths for a BIDS dataset root."""

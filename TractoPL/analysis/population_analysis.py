@@ -18,7 +18,7 @@ options. Each variable (group or correlation) can specify its own list of
 confounds to control for.
 
 Usage:
-    python AFQ_analysis.py -c config.json [--subjects-table subjects.csv] [--output-dir /path/to/output]
+    python population_analysis.py -c config.json [--subjects-table subjects.csv] [--output-dir /path/to/output]
 """
 
 import os
@@ -153,6 +153,7 @@ def validate_config(config: Dict) -> None:
     if not os.path.isdir(dataset_path):
         raise FileNotFoundError(f"Configured dataset does not exist: {dataset_path}")
     pipeline_name = config.get("hcp_asso_pipeline")
+    
     if not isinstance(pipeline_name, str) or not pipeline_name:
         raise ValueError("Configuration key 'hcp_asso_pipeline' must be a pipeline name")
 
@@ -1866,143 +1867,143 @@ def plot_group_diff(
     The significance indicator line and cluster shading adapt to the
     configured FWE_METHOD.
     """
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(
-        data=long_df,
-        x="point",
-        y="value",
-        hue=classif_col,
-        estimator="mean",
-        errorbar=("ci", 95),
-    )
+    # plt.figure(figsize=(10, 5))
+    # sns.lineplot(
+    #     data=long_df,
+    #     x="point",
+    #     y="value",
+    #     hue=classif_col,
+    #     estimator="mean",
+    #     errorbar=("ci", 95),
+    # )
 
-    sig_col = (
-        "sig_afq"
-        if ttest_df is not None
-        and not ttest_df.empty
-        and "sig_afq" in ttest_df.columns
-        else "sig_fdr"
-    )
+    # sig_col = (
+    #     "sig_afq"
+    #     if ttest_df is not None
+    #     and not ttest_df.empty
+    #     and "sig_afq" in ttest_df.columns
+    #     else "sig_fdr"
+    # )
 
-    # Highlight significant clusters (clusterFWE or mixed only)
-    if (
-        FWE_METHOD in ("clusterFWE", "mixed")
-        and ttest_df is not None
-        and not ttest_df.empty
-        and "sig_afq" in ttest_df.columns
-    ):
-        _highlight_clusters(plt.gca(), ttest_df["point"], ttest_df["sig_afq"])
+    # # Highlight significant clusters (clusterFWE or mixed only)
+    # if (
+    #     FWE_METHOD in ("clusterFWE", "mixed")
+    #     and ttest_df is not None
+    #     and not ttest_df.empty
+    #     and "sig_afq" in ttest_df.columns
+    # ):
+    #     _highlight_clusters(plt.gca(), ttest_df["point"], ttest_df["sig_afq"])
 
-    # Plot significance indicator line
-    if (
-        ttest_df is not None
-        and not ttest_df.empty
-        and ttest_df[sig_col].any()
-    ):
-        all_vals = pd.to_numeric(long_df["value"], errors="coerce")
-        if all_vals.notna().any():
-            low = np.nanquantile(all_vals, 0.02)
-            high = np.nanquantile(all_vals, 0.98)
-        else:
-            low, high = 0, 1
+    # # Plot significance indicator line
+    # if (
+    #     ttest_df is not None
+    #     and not ttest_df.empty
+    #     and ttest_df[sig_col].any()
+    # ):
+    #     all_vals = pd.to_numeric(long_df["value"], errors="coerce")
+    #     if all_vals.notna().any():
+    #         low = np.nanquantile(all_vals, 0.02)
+    #         high = np.nanquantile(all_vals, 0.98)
+    #     else:
+    #         low, high = 0, 1
 
-        sig_line = ttest_df[["point"]].copy()
-        sig_line["sig_line"] = np.where(ttest_df[sig_col], high, low)
+    #     sig_line = ttest_df[["point"]].copy()
+    #     sig_line["sig_line"] = np.where(ttest_df[sig_col], high, low)
 
-        if FWE_METHOD == "alphaFWE":
-            label_txt = "Significant (alphaFWE)"
-        elif FWE_METHOD == "mixed":
-            label_txt = "Significant (mixed: cluster+alpha)"
-        else:
-            label_txt = "Significant (clusterFWE)"
-        plt.plot(
-            sig_line["point"],
-            sig_line["sig_line"],
-            color="red",
-            linestyle="--",
-            linewidth=1.8,
-            label=label_txt,
-        )
+    #     if FWE_METHOD == "alphaFWE":
+    #         label_txt = "Significant (alphaFWE)"
+    #     elif FWE_METHOD == "mixed":
+    #         label_txt = "Significant (mixed: cluster+alpha)"
+    #     else:
+    #         label_txt = "Significant (clusterFWE)"
+    #     plt.plot(
+    #         sig_line["point"],
+    #         sig_line["sig_line"],
+    #         color="red",
+    #         linestyle="--",
+    #         linewidth=1.8,
+    #         label=label_txt,
+    #     )
 
-    ax = plt.gca()
+    # ax = plt.gca()
 
-    # P-value bar on secondary axis
-    if (
-        ttest_df is not None
-        and not ttest_df.empty
-        and "p_raw" in ttest_df.columns
-    ):
-        ttest_df = ttest_df.copy()
-        ttest_df["p_raw"] = ttest_df["p_raw"].clip(lower=0, upper=1)
-        ax2 = ax.twinx()
-        ax2.bar(
-            ttest_df["point"],
-            ttest_df["p_raw"],
-            color="gray",
-            alpha=0.18,
-            width=1.0,
-            label="p-value",
-        )
+    # # P-value bar on secondary axis
+    # if (
+    #     ttest_df is not None
+    #     and not ttest_df.empty
+    #     and "p_raw" in ttest_df.columns
+    # ):
+    #     ttest_df = ttest_df.copy()
+    #     ttest_df["p_raw"] = ttest_df["p_raw"].clip(lower=0, upper=1)
+    #     ax2 = ax.twinx()
+    #     ax2.bar(
+    #         ttest_df["point"],
+    #         ttest_df["p_raw"],
+    #         color="gray",
+    #         alpha=0.18,
+    #         width=1.0,
+    #         label="p-value",
+    #     )
 
-        pmax = (
-            float(ttest_df["p_raw"].max())
-            if ttest_df["p_raw"].notna().any()
-            else 0.05
-        )
-        ymax = min(1.0, max(0.06, pmax * 1.15))
+    #     pmax = (
+    #         float(ttest_df["p_raw"].max())
+    #         if ttest_df["p_raw"].notna().any()
+    #         else 0.05
+    #     )
+    #     ymax = min(1.0, max(0.06, pmax * 1.15))
 
-        if "alphaFWE" in ttest_df.columns and not ttest_df["alphaFWE"].isna().all():
-            alphaFWE_val = ttest_df["alphaFWE"].iloc[0]
-            if not np.isnan(alphaFWE_val) and FWE_METHOD in ("alphaFWE", "mixed"):
-                ax2.axhline(
-                    alphaFWE_val,
-                    color="green",
-                    linestyle=":",
-                    linewidth=1.2,
-                    label=f"alphaFWE={alphaFWE_val:.3g}",
-                )
-                ymax = max(ymax, alphaFWE_val * 1.15)
+    #     if "alphaFWE" in ttest_df.columns and not ttest_df["alphaFWE"].isna().all():
+    #         alphaFWE_val = ttest_df["alphaFWE"].iloc[0]
+    #         if not np.isnan(alphaFWE_val) and FWE_METHOD in ("alphaFWE", "mixed"):
+    #             ax2.axhline(
+    #                 alphaFWE_val,
+    #                 color="green",
+    #                 linestyle=":",
+    #                 linewidth=1.2,
+    #                 label=f"alphaFWE={alphaFWE_val:.3g}",
+    #             )
+    #             ymax = max(ymax, alphaFWE_val * 1.15)
 
-        if (
-            "clusterFWE" in ttest_df.columns
-            and not ttest_df["clusterFWE"].isna().all()
-        ):
-            cluster_val = ttest_df["clusterFWE"].iloc[0]
-            if not np.isnan(cluster_val) and FWE_METHOD in ("clusterFWE", "mixed"):
-                ax2.text(
-                    0.01,
-                    0.95,
-                    f"clusterFWE>={int(cluster_val)} (alpha={AFQ_ALPHA})",
-                    transform=ax2.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=8,
-                    bbox=dict(
-                        boxstyle="round",
-                        facecolor="white",
-                        alpha=0.6,
-                        edgecolor="gray",
-                    ),
-                )
+    #     if (
+    #         "clusterFWE" in ttest_df.columns
+    #         and not ttest_df["clusterFWE"].isna().all()
+    #     ):
+    #         cluster_val = ttest_df["clusterFWE"].iloc[0]
+    #         if not np.isnan(cluster_val) and FWE_METHOD in ("clusterFWE", "mixed"):
+    #             ax2.text(
+    #                 0.01,
+    #                 0.95,
+    #                 f"clusterFWE>={int(cluster_val)} (alpha={AFQ_ALPHA})",
+    #                 transform=ax2.transAxes,
+    #                 ha="left",
+    #                 va="top",
+    #                 fontsize=8,
+    #                 bbox=dict(
+    #                     boxstyle="round",
+    #                     facecolor="white",
+    #                     alpha=0.6,
+    #                     edgecolor="gray",
+    #                 ),
+    #             )
 
-        ax2.set_ylabel("p-value")
-        ax2.set_ylim(0, ymax)
+    #     ax2.set_ylabel("p-value")
+    #     ax2.set_ylim(0, ymax)
 
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        if h1 or h2:
-            ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
+    #     h1, l1 = ax.get_legend_handles_labels()
+    #     h2, l2 = ax2.get_legend_handles_labels()
+    #     if h1 or h2:
+    #         ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
 
-    plt.title(
-        f"{bundle_name} - {metric_name} - {classif_col} {title_suffix} ({FWE_METHOD})"
-    )
-    plt.xlabel("Point")
-    plt.ylabel(metric_name)
-    _annotate_missing(ax, removed_subjects or [], removed_points or [])
-    _annotate_pvalues(ax, ttest_df, sig_col)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+    # plt.title(
+    #     f"{bundle_name} - {metric_name} - {classif_col} {title_suffix} ({FWE_METHOD})"
+    # )
+    # plt.xlabel("Point")
+    # plt.ylabel(metric_name)
+    # _annotate_missing(ax, removed_subjects or [], removed_points or [])
+    # _annotate_pvalues(ax, ttest_df, sig_col)
+    # plt.tight_layout()
+    # plt.savefig(out_path, dpi=150)
+    # plt.close()
 
     if export_csv:
         out_csv = os.path.splitext(out_path)[0] + ".csv"
@@ -2043,113 +2044,113 @@ def plot_correlation(
     """
     Plot correlation: r values, p-values bar, and significant point markers.
     """
-    plt.figure(figsize=(10, 5))
-    if corr_df.empty:
-        plt.text(0.5, 0.5, "No data", ha="center")
-        plt.title(
-            f"{bundle_name} - {metric_name} - Correlation {var_name} "
-            f"{title_suffix} ({FWE_METHOD})"
-        )
-    else:
-        ax = plt.gca()
+    # plt.figure(figsize=(10, 5))
+    # if corr_df.empty:
+    #     plt.text(0.5, 0.5, "No data", ha="center")
+    #     plt.title(
+    #         f"{bundle_name} - {metric_name} - Correlation {var_name} "
+    #         f"{title_suffix} ({FWE_METHOD})"
+    #     )
+    # else:
+    #     ax = plt.gca()
 
-        # Highlight significant clusters
-        if FWE_METHOD in ("clusterFWE", "mixed") and "sig_afq" in corr_df.columns:
-            _highlight_clusters(ax, corr_df["point"], corr_df["sig_afq"])
+    #     # Highlight significant clusters
+    #     if FWE_METHOD in ("clusterFWE", "mixed") and "sig_afq" in corr_df.columns:
+    #         _highlight_clusters(ax, corr_df["point"], corr_df["sig_afq"])
 
-        ax.plot(corr_df["point"], corr_df["r"], color="tab:blue", label="r")
-        ax.axhline(0, color="black", lw=0.8)
-        ax.set_ylabel(f"r ({CORRELATION_TEST})")
+    #     ax.plot(corr_df["point"], corr_df["r"], color="tab:blue", label="r")
+    #     ax.axhline(0, color="black", lw=0.8)
+    #     ax.set_ylabel(f"r ({CORRELATION_TEST})")
 
-        # Clip p-values for plotting
-        if "p_raw" in corr_df.columns:
-            corr_df = corr_df.copy()
-            corr_df["p_raw"] = corr_df["p_raw"].clip(lower=0, upper=1)
+    #     # Clip p-values for plotting
+    #     if "p_raw" in corr_df.columns:
+    #         corr_df = corr_df.copy()
+    #         corr_df["p_raw"] = corr_df["p_raw"].clip(lower=0, upper=1)
 
-        ax2 = ax.twinx()
-        ax2.bar(
-            corr_df["point"],
-            corr_df["p_raw"],
-            color="gray",
-            alpha=0.25,
-            width=1.0,
-            label="p-value",
-        )
-        pmax = (
-            float(corr_df["p_raw"].max())
-            if corr_df["p_raw"].notna().any()
-            else 0.05
-        )
-        ymax = min(1.0, max(0.06, pmax * 1.15))
+    #     ax2 = ax.twinx()
+    #     ax2.bar(
+    #         corr_df["point"],
+    #         corr_df["p_raw"],
+    #         color="gray",
+    #         alpha=0.25,
+    #         width=1.0,
+    #         label="p-value",
+    #     )
+    #     pmax = (
+    #         float(corr_df["p_raw"].max())
+    #         if corr_df["p_raw"].notna().any()
+    #         else 0.05
+    #     )
+    #     ymax = min(1.0, max(0.06, pmax * 1.15))
 
-        if (
-            "alphaFWE" in corr_df.columns
-            and not corr_df["alphaFWE"].isna().all()
-            and FWE_METHOD in ("alphaFWE", "mixed")
-        ):
-            alphaFWE_val = corr_df["alphaFWE"].iloc[0]
-            if not np.isnan(alphaFWE_val):
-                ax2.axhline(
-                    alphaFWE_val,
-                    color="red",
-                    linestyle=":",
-                    linewidth=1.2,
-                    label=f"alphaFWE={alphaFWE_val:.3g}",
-                )
-                ymax = max(ymax, alphaFWE_val * 1.15)
+    #     if (
+    #         "alphaFWE" in corr_df.columns
+    #         and not corr_df["alphaFWE"].isna().all()
+    #         and FWE_METHOD in ("alphaFWE", "mixed")
+    #     ):
+    #         alphaFWE_val = corr_df["alphaFWE"].iloc[0]
+    #         if not np.isnan(alphaFWE_val):
+    #             ax2.axhline(
+    #                 alphaFWE_val,
+    #                 color="red",
+    #                 linestyle=":",
+    #                 linewidth=1.2,
+    #                 label=f"alphaFWE={alphaFWE_val:.3g}",
+    #             )
+    #             ymax = max(ymax, alphaFWE_val * 1.15)
 
-        if (
-            "clusterFWE" in corr_df.columns
-            and not corr_df["clusterFWE"].isna().all()
-            and FWE_METHOD in ("clusterFWE", "mixed")
-        ):
-            cluster_val = corr_df["clusterFWE"].iloc[0]
-            if not np.isnan(cluster_val):
-                ax2.text(
-                    0.01,
-                    0.95,
-                    f"clusterFWE>={int(cluster_val)} (alpha={AFQ_ALPHA})",
-                    transform=ax2.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=8,
-                    bbox=dict(
-                        boxstyle="round",
-                        facecolor="white",
-                        alpha=0.6,
-                        edgecolor="gray",
-                    ),
-                )
+    #     if (
+    #         "clusterFWE" in corr_df.columns
+    #         and not corr_df["clusterFWE"].isna().all()
+    #         and FWE_METHOD in ("clusterFWE", "mixed")
+    #     ):
+    #         cluster_val = corr_df["clusterFWE"].iloc[0]
+    #         if not np.isnan(cluster_val):
+    #             ax2.text(
+    #                 0.01,
+    #                 0.95,
+    #                 f"clusterFWE>={int(cluster_val)} (alpha={AFQ_ALPHA})",
+    #                 transform=ax2.transAxes,
+    #                 ha="left",
+    #                 va="top",
+    #                 fontsize=8,
+    #                 bbox=dict(
+    #                     boxstyle="round",
+    #                     facecolor="white",
+    #                     alpha=0.6,
+    #                     edgecolor="gray",
+    #                 ),
+    #             )
 
-        ax2.set_ylabel("p-value")
-        ax2.set_ylim(0, ymax)
+    #     ax2.set_ylabel("p-value")
+    #     ax2.set_ylim(0, ymax)
 
-        if "sig_afq" in corr_df.columns and corr_df["sig_afq"].any():
-            sig = corr_df[corr_df["sig_afq"]]
-            ax.scatter(
-                sig["point"], sig["r"], color="red", s=22, label="significant"
-            )
-            tmp = corr_df.copy()
-            tmp["sig_afq"] = corr_df["sig_afq"]
-            _annotate_pvalues(
-                ax2, tmp.rename(columns={"sig_afq": "sig_fdr"}), "sig_fdr"
-            )
+    #     if "sig_afq" in corr_df.columns and corr_df["sig_afq"].any():
+    #         sig = corr_df[corr_df["sig_afq"]]
+    #         ax.scatter(
+    #             sig["point"], sig["r"], color="red", s=22, label="significant"
+    #         )
+    #         tmp = corr_df.copy()
+    #         tmp["sig_afq"] = corr_df["sig_afq"]
+    #         _annotate_pvalues(
+    #             ax2, tmp.rename(columns={"sig_afq": "sig_fdr"}), "sig_fdr"
+    #         )
 
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        if h1 or h2:
-            ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
+    #     h1, l1 = ax.get_legend_handles_labels()
+    #     h2, l2 = ax2.get_legend_handles_labels()
+    #     if h1 or h2:
+    #         ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
 
-        plt.title(
-            f"{bundle_name} - {metric_name} - Correlation {var_name} "
-            f"{title_suffix} ({FWE_METHOD})"
-        )
-        _annotate_missing(ax, removed_subjects or [], removed_points or [])
+    #     plt.title(
+    #         f"{bundle_name} - {metric_name} - Correlation {var_name} "
+    #         f"{title_suffix} ({FWE_METHOD})"
+    #     )
+    #     _annotate_missing(ax, removed_subjects or [], removed_points or [])
 
-    plt.xlabel("Point")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+    # plt.xlabel("Point")
+    # plt.tight_layout()
+    # plt.savefig(out_path, dpi=150)
+    # plt.close()
 
     if export_csv:
         out_csv = os.path.splitext(out_path)[0] + ".csv"
@@ -2918,16 +2919,17 @@ def main():
         _SUBJECTS_FILTER, _SUBJECTS_TABLE_DF = load_subjects_table(
             args.subjects_table
         )
+        _ADDITIONAL_INFO_DF=_SUBJECTS_TABLE_DF
         print(
             f"Subjects table loaded: {len(_SUBJECTS_FILTER)} participant(s) to process"
         )
         validate_config_columns_in_table(_SUBJECTS_TABLE_DF, config)
-
-    # --- Load external tables (optional, driven by config) ---
-    additional_info_path = config.get("additional_info_path")
-    _ADDITIONAL_INFO_DF = _load_external_tables(
-        additional_info_path
-    )
+    else:
+        # --- Load external tables (optional, driven by config) ---
+        additional_info_path = config.get("additional_info_path")
+        _ADDITIONAL_INFO_DF = _load_external_tables(
+            additional_info_path
+        )
 
     # --- Load dataset ---
     ds = Dataset(dataset)

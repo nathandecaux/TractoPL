@@ -237,5 +237,5 @@ options through `--help`.
 
 The Apptainer equivalents are
 [`run_workflow_apptainer.sh`](run_workflow_apptainer.sh) and
-[`run_workflow_apptainer_dev.sh`](run_workflow_apptainer_dev.sh). They invoke
+[`run_workflow_apptainer.sh`](run_workflow_apptainer.sh). They invoke
 this same workflow inside an image while binding the dataset and atlas paths.

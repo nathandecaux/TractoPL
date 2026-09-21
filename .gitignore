@@ -1,9 +1,14 @@
 *.pyc
 apptainer_tmp
-
-
+TractoPL/output
 TractoPL/__pycache__/
 *.sif
 plan.md
 *__pycache__
 TractoPL/config_profiles/my_atlas_manifest.json
+TractoPL/analysis/summarize_apathy.py
+TractoPL/analysis/summarize_short.py
+TractoPL/analysis/report_apathy.md.jinja2
+TractoPL/analysis/report_short.md.jinja2
+TractoPL/analysis/report_template_tracto.md.jinja2
+TractoPL/analysis/report_template.md.jinja2

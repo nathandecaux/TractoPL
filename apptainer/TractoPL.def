@@ -3,36 +3,31 @@ From: ubuntu:24.04
 
 %labels
     Author Nathan Decaux <nathan.decaux@hotmail.fr>
-    Description TractoPL runtime with Anima 4.2, Conda MRtrix3, and ANTs
+    Description Development runtime for a locally mounted TractoPL checkout
 
-%files
-    . /opt/tractopl
+%help
+    Development runtime for TractoPL. Mount your checkout before running:
+
+        apptainer run --bind /path/to/TractoPL:/opt/tractopl tractopl.sif tractopl-preprocessing --help
+
+    Tools: Anima (/opt/anima), ANTs (/opt/ants/bin), MRtrix3 (/opt/mrtrix3/bin),
+    tractosearch (/opt/tractosearch/scripts), wrappers tractopl-* (/usr/local/bin).
 
 %post
+    set -eu
+
+    # --- system packages: bare minimum, everything else comes from conda ---
+    # g++ is needed at build time: lpqtree has no cp311 wheel on PyPI, so pip
+    # compiles its pybind11 extension against /opt/conda's Python.
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        bzip2 \
-        git \
-        git-lfs \
-        libglib2.0-0 \
-        libgl1 \
-        libpng-dev \
-        libtiff-dev \
-        python3 \
-        python3-dev \
-        python3-pip \
-        python-is-python3 \
-        unzip \
-        wget \
-        zlib1g-dev
+        bzip2 ca-certificates g++ git git-lfs unzip wget
     rm -rf /var/lib/apt/lists/*
 
+    # --- Anima (official binaries, not available on conda-forge) ---
     wget -q -O /tmp/anima.zip \
         https://github.com/Inria-Empenn/Anima-Public/releases/download/v4.2/Anima-Ubuntu-4.2.zip
-    mkdir -p /tmp/anima-extract
     unzip -q /tmp/anima.zip -d /tmp/anima-extract
     rm /tmp/anima.zip
     anima_dir=$(find /tmp/anima-extract -mindepth 1 -maxdepth 1 -type d -print -quit)
@@ -40,19 +35,20 @@ From: ubuntu:24.04
     mv "$anima_dir" /opt/anima
     chmod +x /opt/anima/*
     rm -rf /tmp/anima-extract
-    test -x /opt/anima/animaMCMEstimator
+    test -x /opt/anima/animaTracksMCMPropertiesExtraction
 
-    git clone --depth 1 \
-        https://github.com/Inria-Empenn/Anima-Scripts-Public.git /opt/anima-scripts-public
-    rm -rf /opt/anima-scripts-public/.git
-
+    # --- Anima-Scripts + data (with LFS) ---
     git lfs install --skip-repo
     git clone --depth 1 \
+        https://github.com/Inria-Empenn/Anima-Scripts-Public.git /opt/anima-scripts-public
+    git clone --depth 1 \
         https://github.com/Inria-Empenn/Anima-Scripts-Data-Public.git /opt/anima-scripts-data-public
-    rm -rf /opt/anima-scripts-data-public/.git
+    rm -rf /opt/anima-scripts-public/.git /opt/anima-scripts-data-public/.git
 
+    # --- ANTs (official prebuilt binaries: keeps the huge bioconda index,
+    # and its cross-product with conda-forge, out of the solve entirely) ---
     wget -q -O /tmp/ants.zip \
-        https://github.com/ANTsX/ANTs/releases/download/v2.6.5/ants-2.6.5-almalinux8-X64-gcc.zip
+        https://github.com/ANTsX/ANTs/releases/download/v2.6.5/ants-2.6.5-almalinux9-X64-gcc.zip
     mkdir -p /opt/ants
     unzip -q /tmp/ants.zip -d /opt/ants
     rm /tmp/ants.zip
@@ -60,46 +56,87 @@ From: ubuntu:24.04
     test -n "$ants_binary"
     ln -s "$(dirname "$ants_binary")" /opt/ants/bin
 
+    # --- micromamba: python + scientific stack in /opt/conda (staged installs),
+    # MRtrix3 in its own env /opt/mrtrix3 ---
     wget -q -O /tmp/micromamba.tar.bz2 \
         https://micro.mamba.pm/api/micromamba/linux-64/latest
     tar -xjf /tmp/micromamba.tar.bz2 -C /tmp bin/micromamba
     install -m 0755 /tmp/bin/micromamba /usr/local/bin/micromamba
     rm -rf /tmp/bin /tmp/info /tmp/micromamba.tar.bz2
-    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba create -y -p /opt/conda \
-        -c conda-forge -c MRtrix3 mrtrix3 libstdcxx-ng
-    rm -rf /opt/micromamba/pkgs
 
-    python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed --upgrade pip
-    python3 -m pip install --no-cache-dir --break-system-packages /opt/tractopl
-    python3 -m pip install --no-cache-dir --break-system-packages h5py
+    # numpy<2: current antspyx wheels are not built against numpy 2
+    #
+    # Solving everything in one micromamba create leaves the solver free to
+    # juggle version combinations across a dozen unpinned scientific packages
+    # (vtk alone has a huge build-variant matrix on conda-forge) and can take
+    # forever. Installing in stages anchors python/numpy first so each later
+    # solve only has to stay compatible with an already-fixed base.
+    conda_opts="-y --channel-priority strict"
 
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba create $conda_opts -p /opt/conda \
+        -c conda-forge \
+        python=3.11 "numpy<2" pip libstdcxx-ng
+
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba install $conda_opts -p /opt/conda \
+        -c conda-forge \
+        vtk SimpleITK numba
+
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba install $conda_opts -p /opt/conda \
+        -c conda-forge \
+        scipy matplotlib pandas h5py nibabel dipy "fury<2.0.0" pydicom shapely click tqdm
+
+    # MRtrix3 gets its own env: mrtrix3 requires qt5 while vtk requires qt6,
+    # and in a shared env the solver silently drops mrtrix3 to install vtk.
+    # Its python scripts (#!/usr/bin/env python) run with /opt/conda's python.
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba create $conda_opts -p /opt/mrtrix3 \
+        -c conda-forge -c MRtrix3 \
+        mrtrix3
+    test -x /opt/mrtrix3/bin/dwi2response
+
+    MAMBA_ROOT_PREFIX=/opt/micromamba micromamba clean -y --all
+
+    # --- pip-only packages, installed inside the conda env ---
     git clone --depth 1 https://github.com/StongeEtienne/tractosearch.git /opt/tractosearch
-    python3 -m pip install --no-cache-dir --break-system-packages /opt/tractosearch
-    sed -i '1s|^#!.*|#!/usr/bin/python3|' /opt/tractosearch/scripts/*.py
+    /opt/conda/bin/python -m pip install --no-cache-dir antspyx lpqtree /opt/tractosearch streamlit
     chmod +x /opt/tractosearch/scripts/*.py
+    rm /opt/tractosearch/scripts/tractosearch_nearest_in_radius.py
     rm -rf /opt/tractosearch/.git
 
+    # --- tractopl-* wrappers (checkout is bind-mounted at /opt/tractopl at runtime) ---
+    for pair in \
+        preprocessing:TractoPL.pipeline.preprocessing \
+        msmt-csd:TractoPL.pipeline.msmt_csd \
+        mcm:TractoPL.pipeline.mcm \
+        bundle-seg:TractoPL.pipeline.bundle_seg \
+        tractometry:TractoPL.pipeline.tractometry \
+        connectome:TractoPL.pipeline.connectome
+    do
+        name=${pair%%:*} module=${pair#*:}
+        printf '#!/bin/sh\nexec /opt/conda/bin/python -m %s "$@"\n' "$module" \
+            > "/usr/local/bin/tractopl-$name"
+        chmod +x "/usr/local/bin/tractopl-$name"
+    done
+
 %environment
-    export PATH=/opt/anima:/opt/conda/bin:/opt/ants/bin:/opt/tractosearch/scripts:$PATH
+    export PATH=/opt/anima:/opt/ants/bin:/opt/conda/bin:/opt/mrtrix3/bin:/opt/tractosearch/scripts:/usr/local/bin:$PATH
+    export PYTHONPATH=/opt/tractopl${PYTHONPATH:+:$PYTHONPATH}
     export TRACTOPL_ANIMA_DIR=/opt/anima
     export TRACTOPL_ANIMA_DATA_DIR=/opt/anima-scripts-data-public
     export TRACTOPL_ANIMA_SCRIPTS_DIR=/opt/anima-scripts-public
     export TRACTOPL_ANIMA_PRIVATE_SCRIPTS_DIR=/opt/anima-scripts-public
-    export TRACTOPL_TRACTSEG_DIR=/opt/tractseg/bin
-    export TRACTOPL_MRTRIX_DIR=/opt/conda/bin
+    export TRACTOPL_MRTRIX_DIR=/opt/mrtrix3/bin
+    # TRACTOPL_TRACTSEG_DIR intentionally unset: TractSeg is not installed in this image
 
 %runscript
     exec "$@"
 
 %test
-    animaMCMEstimator --help >/dev/null
-    dwi2response --help >/dev/null
-    antsRegistration --help >/dev/null
+    set -e
+    animaTracksMCMPropertiesExtraction --help > /dev/null
+    dwi2response -help > /dev/null
+    antsRegistration --help > /dev/null
+    /opt/conda/bin/python -c "import ants, dipy, nibabel, SimpleITK, vtk"
+    tractosearch_nearest.py --help > /dev/null
     test -d /opt/anima-scripts-public/brain_extraction
     test -d /opt/anima-scripts-data-public
-    tractosearch_nearest.py --help >/dev/null
-    tractopl-preprocessing --help >/dev/null
-    tractopl-msmt-csd --help >/dev/null
-    tractopl-mcm --help >/dev/null
-    tractopl-bundle-seg --help >/dev/null
-    tractopl-tractometry --help >/dev/null
+    test -x /usr/local/bin/tractopl-preprocessing

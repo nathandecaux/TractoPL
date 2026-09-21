@@ -16,7 +16,7 @@ setup(
             'tractopl-convert-tractogram=TractoPL.scripts.convert_tractogram:main',
             'tractopl-frechet-clustering=TractoPL.atlasing.frechet_clustering:main',
             'tractopl-generate-centroid=TractoPL.atlasing.generate_centroid:main',
-            'tractopl-afq-analysis=TractoPL.analysis.AFQ_analysis:main',
+            'tractopl-population-analysis=TractoPL.analysis.population_analysis:main',
             'tractopl-preprocessing=TractoPL.pipeline.preprocessing:cli',
             'tractopl-msmt-csd=TractoPL.pipeline.msmt_csd:process_subject',
             'tractopl-mcm=TractoPL.pipeline.mcm:cli',

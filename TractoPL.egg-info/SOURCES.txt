@@ -10,7 +10,7 @@ TractoPL.egg-info/SOURCES.txt
 TractoPL.egg-info/dependency_links.txt
 TractoPL.egg-info/requires.txt
 TractoPL.egg-info/top_level.txt
-TractoPL/analysis/AFQ_analysis.py
+TractoPL/analysis/population_analysis.py
 TractoPL/analysis/__init__.py
 TractoPL/analysis/afq_optimized.py
 TractoPL/analysis/compare_mcm_strat.py
