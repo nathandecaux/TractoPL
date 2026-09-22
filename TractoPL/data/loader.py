@@ -580,7 +580,8 @@ class Dataset:
                 if isinstance(v, str) and v.startswith('!'):
                     continue
                 return df.iloc[0:0]
-            col = df[k].astype(str)
+            # pandas >= 3 keeps NaN through astype(str); map it to 'nan' as pandas 2 did
+            col = df[k].astype(object).where(df[k].notna(), 'nan').astype(str)
             if isinstance(v, str) and v.startswith('!'):
                 target = v[1:]
                 # Support wildcard * pour négation

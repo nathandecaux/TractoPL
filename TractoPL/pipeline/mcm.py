@@ -613,11 +613,16 @@ def process_subject(
 @click.option('--n-comparts', type=click.IntRange(1), default=3, show_default=True, help='Number of anisotropic compartments.')
 @click.option('--tensor-model', 'tensor_model', type=click.IntRange(1), default=3, show_default=True, help='Anisotropic tensor model.')
 @click.option('--free-water/--no-free-water', default=True, show_default=True, help='Estimate a free-water compartment.')
+@click.option('--restricted-water/--no-restricted-water', default=True, show_default=True, help='Estimate a restricted-water compartment.')
+@click.option('--stanisz', is_flag=True, help='Estimate a Stanisz isotropic compartment.')
+@click.option('--stationary-water', is_flag=True, help='Estimate a stationary-water compartment.')
 @click.option('--model-selection', is_flag=True, help='Select the MCM model with AIC instead of a fixed compartment count.')
-@click.option('--ml-mode', type=click.IntRange(0), default=2, show_default=True, help='Anima maximum-likelihood fitting mode.')
-@click.option('--optimizer', default='levenberg', show_default=True, help='Anima optimizer name.')
+@click.option('--ml-mode', type=click.IntRange(0, 2), default=2, show_default=True, help='Anima maximum-likelihood fitting mode.')
+@click.option('--optimizer', type=click.Choice(['levenberg', 'bobyqa', 'ccsaq', 'bfgs']), default='levenberg', show_default=True, help='Anima optimizer name.')
+@click.option('--n-threads', type=click.IntRange(1), default=None, help='Number of Anima threads (default: all cores).')
 def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_model,
-    free_water, model_selection, ml_mode, optimizer):
+    free_water, restricted_water, stanisz, stationary_water, model_selection, ml_mode,
+    optimizer, n_threads):
     """
     Command-line interface for processing a single subject.
     """
@@ -626,12 +631,16 @@ def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_mo
     if step == 'estimation':
         pipeline_list = ['mcm_estimation']
         estimation_options = {
-            'R': True,
+            'R': restricted_water,
             'c': tensor_model,
             'F': free_water,
+            'Z': stanisz,
+            'S': stationary_water,
             'ml_mode': CLIArg('ml-mode', ml_mode),
             'opt': CLIArg('optimizer', optimizer),
         }
+        if n_threads:
+            estimation_options['T'] = n_threads
         if model_selection:
             estimation_options['M'] = True
         else:

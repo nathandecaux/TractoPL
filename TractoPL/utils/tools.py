@@ -388,7 +388,7 @@ class CLIArg:
                 self.name = '-'+self.name
 
     def get(self):
-        if self.value:
+        if self.value is not None and self.value != '':
             return [f"{self.name}", str(self.value)]
         else:
             return [f"{self.name}"]
@@ -414,8 +414,9 @@ def add_kwargs_to_cli(command,**kwargs):
             if isinstance(value,CLIArg):
                 command=command+value.get()
             else:
-                if isinstance(value,bool) and value:
-                    command = command + [f"-{key.replace('-','')}"]
+                if isinstance(value,bool):
+                    if value:
+                        command = command + [f"-{key.replace('-','')}"]
                 else :
                     command = command + [f"-{key.replace('-','')}", str(value)]
         return command

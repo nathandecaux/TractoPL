@@ -5,7 +5,9 @@
 TractoPL is a diffusion MRI processing package that focus on Multi compartment models and tractometry. It is part of a collection of other tools that makes diffusion image processing and analysis easier :
 
 - [TractoPL](https://github.com/nathandecaux/TractoPL) : collection of helpers, scripts, and dashboard for tractometry, from the DWI to population-level bundle profile analysis.
+
 <!-- - [Pybides](https://github.com/nathandecaux/PyBides) : Lightweight, dependency-friendly helpers to browse, query, and write BIDS-like datasets without requiring a full BIDS indexer. -->
+
 - [TractViewer](https://github.com/nathandecaux/TractViewer) : A simple utility based on PyVista for viewing and capturing tractography, surfaces, and volumes.
 - [HCP105 bundle templates](https://zenodo.org/records/22641462) :  Utilities for bringing the **HCP105 white-matter reference tract** dataset into a shared atlas space and creating bundle-wise tractogram templates.
 
@@ -29,7 +31,7 @@ Run `tractopl-preprocessing --help` or any other command with `--help` to inspec
 
 Pass the BIDS root explicitly to every command with `--db-root`. You can also set `TRACTOPL_DATASET_ROOT` for Python API use. TractoPL never selects a local dataset automatically.
 
-The initial input for one participant is a BIDS DWI image with matching `.bval` and `.bvec` files. Existing BIDS derivatives can stay where they are: `Dataset` indexes raw and derivative files together, `Subject` selects files by their entities, and `BIDSFile` retains the entities needed to write new outputs. 
+The initial input for one participant is a BIDS DWI image with matching `.bval` and `.bvec` files. Existing BIDS derivatives can stay where they are: `Dataset` indexes raw and derivative files together, `Subject` selects files by their entities, and `BIDSFile` retains the entities needed to write new outputs.
 
 ```python
 from TractoPL.data.loader import Dataset
@@ -56,17 +58,18 @@ bash examples/run_workflow.sh /data/my-bids-dataset /data/my-atlas/atlas.json 01
 ```
 
 The script runs :
-- preprocessing, 
+
+- preprocessing,
 - creates FODs/fixels and an iFOD2 tractogram,
-- fits MCM, 
+- fits MCM,
 - segments bundles from whole-brain tractograms,
 - projects MCM metrics onto those bundles,
-- and writes tractometry CSV files. 
-
+- and writes tractometry CSV files.
 
 ## Apptainer
 
 An Apptainer definition is available at [apptainer/TractoPL.def](apptainer/TractoPL.def). It packages all the required tools for running TractoPL, including Anima 4.2, MRtrix3 from Conda, and ANTs.
+
 <!-- T
 ractoPL, Anima 4.2, MRtrix3 from Conda, and ANTs. Both Apptainer recipes download the official Anima 4.2 Ubuntu binaries from the [Anima-Public releases](https://github.com/Inria-Empenn/Anima-Public/releases/tag/v4.2) and clone the `Anima-Scripts-Public` and `Anima-Scripts-Data-Public` repositories during the build, so no local Anima checkout is required on the build host — only network access to GitHub. The image deliberately does not include a BIDS dataset, an atlas, bundle templates, or centroids.  -->
 
@@ -95,7 +98,6 @@ bash examples/run_workflow_apptainer.sh \
 
 The launcher binds every supplied directory at the same absolute path inside the container. This keeps relative paths in an atlas manifest valid and writes derivatives directly to the host BIDS root. -->
 
-
 [apptainer/TractoPL.def](apptainer/TractoPL.def) builds the same tool runtime without copying or installing this repository. It is intended for development: the local checkout is mounted at runtime, so Python changes are used immediately and rebuilding the image is unnecessary.
 
 ```shell
@@ -112,23 +114,35 @@ bash examples/run_workflow_apptainer.sh \
 
 The launcher mounts the checkout at `/opt/tractopl`, sets `PYTHONPATH=/opt/tractopl`, and invokes the mounted `examples/run_workflow.sh`. The image provides `tractopl-preprocessing`, `tractopl-msmt-csd`, `tractopl-mcm`, `tractopl-bundle-seg`, `tractopl-tractometry`, `tractopl-connectome`, `tractopl-generate-centroid`, `tractopl-frechet-clustering`, `tractopl-apply-trans-to-vtk`, `tractopl-convert-tractogram`, and `tractopl-population-analysis` wrappers that load modules from this checkout. Changes to packaging metadata or Python dependencies still require rebuilding the development image.
 
+## Quick start
+
+Use the workflow launcher using streamlit : 
+
+```Shell
+streamlit run streamlit_launcher.py
+```
+
+It detects your dataset, retrieve the right files for each individual subjects, let you run the workflow step by step, and gives you a feedback on the success of the pipeline. 
+
+![launcher](launcher.png)
+
 ## Command-Line Tools
 
 The package installs the following maintained commands:
 
-| Command                         | Purpose                                                 |
-| ------------------------------- | ------------------------------------------------------- |
-| `tractopl-preprocessing`      | Preprocess DWI, fit DTI, and compute FA.                |
-| `tractopl-msmt-csd`           | Generate responses, FODs, fixels, and tractography.     |
-| `tractopl-mcm`                | Fit MCM or project MCM metrics onto bundle tractograms. |
-| `tractopl-bundle-seg`         | Register the atlas and segment bundles.                 |
-| `tractopl-tractometry`        | Associate metrics to centroids or combine CSV files.    |
-| `tractopl-connectome`         | Compute bundle density metrics.                         |
-| `tractopl-generate-centroid`  | Generate a centroid VTK from one tractogram.            |
-| `tractopl-frechet-clustering` | Generate centroid clusters with Fréchet distances.     |
-| `tractopl-apply-trans-to-vtk` | Apply a transform to a VTK tractogram.                  |
-| `tractopl-convert-tractogram` | Convert a tractogram format.                            |
-| `tractopl-population-analysis` | Perform population-level analysis on tractometry data. | 
+| Command                          | Purpose                                                 |
+| -------------------------------- | ------------------------------------------------------- |
+| `tractopl-preprocessing`       | Preprocess DWI, fit DTI, and compute FA.                |
+| `tractopl-msmt-csd`            | Generate responses, FODs, fixels, and tractography.     |
+| `tractopl-mcm`                 | Fit MCM or project MCM metrics onto bundle tractograms. |
+| `tractopl-bundle-seg`          | Register the atlas and segment bundles.                 |
+| `tractopl-tractometry`         | Associate metrics to centroids or combine CSV files.    |
+| `tractopl-connectome`          | Compute bundle density metrics.                         |
+| `tractopl-generate-centroid`   | Generate a centroid VTK from one tractogram.            |
+| `tractopl-frechet-clustering`  | Generate centroid clusters with Fréchet distances.     |
+| `tractopl-apply-trans-to-vtk`  | Apply a transform to a VTK tractogram.                  |
+| `tractopl-convert-tractogram`  | Convert a tractogram format.                            |
+| `tractopl-population-analysis` | Perform population-level analysis on tractometry data.  |
 
 Typical commands for one participant are:
 
@@ -146,6 +160,37 @@ tractopl-tractometry association --subject 01 --db-root /data/my-bids-dataset \
 ```
 
 MCM uses peak/fixel density when it is available. Use `--n-comparts` to fit a fixed number of anisotropic compartments, or `--model-selection` to use AIC. The historical maximum-likelihood mode and Levenberg optimizer remain the defaults. Tractometry reads bundle names from BIDS derivative entities instead of imposing an HCP list. Use `tractopl-tractometry combine-csv` to create TractSeg-style metric CSV files from an existing tractometry derivative.
+
+## Workflow Launcher
+
+A Streamlit page builds and runs the commands above from the browser:
+
+```shell
+pip install '.[dashboard]'
+streamlit run TractoPL/dashboard/streamlit_launcher.py
+```
+
+Enter the BIDS root and atlas manifest in the sidebar. The launcher indexes the
+dataset with `Dataset`, lists the detected participants, and offers the existing
+derivative pipelines wherever a step needs one.
+
+Each workflow step gets its own block with its options, the exact command lines
+it will run for the selected participants, and a button to run that step alone.
+`Run the included steps` runs every checked block in order and stops at the
+first failure.
+
+Each block also shows, per participant, which of its inputs and expected outputs
+exist in the dataset. Outputs of one step are the inputs of the next ones, so
+the tables show where a participant stopped. After each command the launcher
+re-indexes the dataset and treats missing outputs as a failure, because some
+commands report errors without a non-zero exit code.
+
+To run inside Apptainer, select `Apptainer` under `Execution`, choose the `.sif`
+image and the TractoPL checkout, and press `Load image`. Loading checks that the
+image imports TractoPL from the mounted checkout and provides the `tractopl-*`
+commands. Commands then run with `apptainer exec`, binding the dataset and atlas
+directories at the same path and the checkout at `/opt/tractopl`, as in
+`examples/run_workflow_apptainer.sh`.
 
 ## Dashboard and AFQ Analysis
 

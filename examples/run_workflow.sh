@@ -23,34 +23,34 @@ for command in \
     }
 done
 
-# tractopl-preprocessing \
-#     --subject "$subject_id" \
-#     --db-root "$dataset_root"
+tractopl-preprocessing \
+    --subject "$subject_id" \
+    --db-root "$dataset_root"
 
-# tractopl-msmt-csd \
-#     --subject "$subject_id" \
-#     --db-root "$dataset_root" \
-#     --step response \
-#     --step fod \
-#     --step fixels \
-#     --step fixels2peaks \
-#     --step fixel_density \
-#     --step ifod2_tracto \
-#     --n-streamlines 1000000
+tractopl-msmt-csd \
+    --subject "$subject_id" \
+    --db-root "$dataset_root" \
+    --step response \
+    --step fod \
+    --step fixels \
+    --step fixels2peaks \
+    --step fixel_density \
+    --step ifod2_tracto \
+    --n-streamlines 1000000
 
-# tractopl-mcm estimation \
-#     --subject "$subject_id" \
-#     --db-root "$dataset_root"
+tractopl-mcm estimation \
+    --subject "$subject_id" \
+    --db-root "$dataset_root"
 
-# tractopl-bundle-seg segmentation \
-#     --subject "$subject_id" \
-#     --db-root "$dataset_root" \
-#     --atlas "$atlas_manifest"
+tractopl-bundle-seg segmentation \
+    --subject "$subject_id" \
+    --db-root "$dataset_root" \
+    --atlas "$atlas_manifest"
 
-# tractopl-mcm projection \
-#     --subject "$subject_id" \
-#     --db-root "$dataset_root" \
-#     --bundle-pipeline bundle_seg
+tractopl-mcm projection \
+    --subject "$subject_id" \
+    --db-root "$dataset_root" \
+    --bundle-pipeline bundle_seg
 
 tractopl-tractometry association \
     --subject "$subject_id" \
