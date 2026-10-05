@@ -12,6 +12,7 @@ from TractoPL.data.vtk_loader import load_vtk, save_vtk
 from dipy.io.streamline import load_trk, save_trk, load_tck, save_tck
 from dipy.io.streamline import load_tractogram, save_tractogram, StatefulTractogram, Space
 from dipy.tracking.streamline import Streamlines
+from concurrent.futures import ThreadPoolExecutor
 
 _SENTINEL = object()  # Défini au niveau du module
 
@@ -424,6 +425,10 @@ class Dataset:
         self._subjects_cache = {}
         self.subject_ids = []  # sera peuplé par build_dataframe()
         # Pré-construction pour exposer immédiatement les sujets
+        self._NAN = float('nan')
+        # Colonnes fixes : une entité du nom de fichier portant l'un de ces noms est ignorée
+        self._RESERVED = frozenset(('path', 'subject', 'session', 'datatype', 'pipeline',
+                            'derivative', 'extension', 'suffix'))
         if restore:
             if restore and os.path.exists(restore if isinstance(restore, str) else '/tmp/actidep.pkl'):
                 self.restore(restore)
@@ -441,122 +446,174 @@ class Dataset:
 
 
 
-    def build_dataframe(self, force=False):
+
+
+    def _list_dir(self,path):
+        """(fichiers 'sub-*' [(nom, chemin)], sous-dossiers [(nom, chemin)]) — comme os.walk."""
+        files, dirs = [], []
+        try:
+            it = os.scandir(path)
+        except OSError:
+            return None
+        with it:
+            for e in it:
+                try:
+                    is_dir = e.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    if not e.is_symlink():
+                        dirs.append((e.name, e.path))
+                elif e.name[:4] == 'sub-':
+                    files.append((e.name, e.path))
+        return files, dirs
+    
+    
+    def _walk_subtree(self, path, subject, session, datatype, skip_derivs, out):
+        """Parcours pré-ordre ; ajoute (subject, session, datatype, fichiers) dans `out`."""
+        listed = self._list_dir(path)
+        if listed is None:
+            return out
+        files, dirs = listed
+        if files:
+            out.append((subject, session, datatype, files))
+        for name, p in dirs:
+            if 'sourcedata' in name or (skip_derivs and name == 'derivatives'):
+                continue
+            s, se, dt = subject, session, datatype
+            h = name[:4]
+            if h == 'sub-':
+                s = name[4:]
+            elif h == 'ses-':
+                se = name[4:]
+            elif s and dt is None:
+                dt = name
+            self._walk_subtree(p, s, se, dt, skip_derivs, out)
+        return out
+ 
+ 
+# --- Méthode à placer dans la classe (remplace l'ancienne) ---
+# n_threads : 8 par défaut sur 2 cœurs (cpu*4, plafonné à 32) ; sur un NFS/Lustre
+# qui encaisse bien la concurrence, 16 à 32 peut encore accélérer.
+    def build_dataframe(self, force=False, n_threads=None):
         if self._df is not None and not force:
             return self._df
-        try:
-            import pandas as pd
-        except ImportError as e:
-            raise ImportError("Installer pandas pour utiliser Dataset.") from e
-
-        rows = []
-
-        def add_file(filepath, pipeline=None, derivative=False, session=None, datatype=None, subject=None):
-            fname = os.path.basename(filepath)
-            if not fname.startswith('sub-'):
-                return
-            # Extension
-            if '.' in fname:
-                dot = fname.find('.')
-                ext = fname[dot:]
-                stem = fname[:dot]
-            else:
-                ext, stem = '', fname
-            parts = stem.split('_')
-            ent = {}
-            subj = subject
-            ses = session
-            for p in parts:
-                if p.startswith('sub-'):
-                    subj = p[4:]
-                elif p.startswith('ses-'):
-                    ses = ses or p[4:]
-                elif '-' in p:
-                    k, v = p.split('-', 1)
-                    ent[k] = v
-            suffix_candidate = parts[-1]
-            suffix = suffix_candidate if '-' not in suffix_candidate else ent.get('suffix', suffix_candidate)
-            row = {
-                'path': filepath,
-                'subject': subj,
-                'session': ses,
-                'datatype': datatype,
-                'pipeline': pipeline,
-                'derivative': derivative,
-                'extension': ext,
-                'suffix': suffix
-            }
-            for k, v in ent.items():
-                if k not in row:
-                    row[k] = v
-            rows.append(row)
-
-        if not os.path.isdir(self.db_root):
-            import pandas as pd
+ 
+        db_root = self.db_root
+        if not os.path.isdir(db_root):
             self._df = pd.DataFrame()
             self.subject_ids = []
             return self._df
-
-        # Raw
-        for root, dirs, files in os.walk(self.db_root):
-            if '/derivatives/' in root or root.endswith('/derivatives'):
-                continue
-            # Déterminer subject / session / datatype
-            parts = root.replace(self.db_root, '').strip('/').split('/')
-            subject = None
-            session = None
-            datatype = None
-            for part in parts:
-                if part.startswith('sub-'):
-                    subject = part[4:]
-                elif part.startswith('ses-'):
-                    session = part[4:]
-                elif subject and datatype is None:
-                    # Premier dossier après subject(/session)
-                    if part not in ['', 'sourcedata']:
-                        datatype = part
-            for f in files:
-                if 'sourcedata' in root:
-                    continue
-                add_file(os.path.join(root, f), derivative=False, subject=subject,
-                         session=session, datatype=datatype)
-
-        # Derivatives
-        derivatives_root = opj(self.db_root, 'derivatives')
-        if os.path.isdir(derivatives_root):
-            for root, dirs, files in os.walk(derivatives_root):
-                rel = root.replace(derivatives_root, '').strip('/')
-                if rel == '':
-                    continue
-                parts = rel.split('/')
-                pipeline = parts[0] if parts else None
-                subject = None
-                session = None
-                datatype = None
-                for part in parts[1:]:
-                    if part.startswith('sub-'):
-                        subject = part[4:]
-                    elif part.startswith('ses-'):
-                        session = part[4:]
-                    elif subject and datatype is None:
-                        if part not in ['', 'sourcedata']:
-                            datatype = part
-                for f in files:
-                    if 'sourcedata' in root:
+ 
+        n_threads = n_threads or getattr(self, 'n_threads', None) or min(32, (os.cpu_count() or 1) * 4)
+ 
+        segments = []
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+ 
+            def plan(path, pipeline, derivative, skip_derivs):
+                listed = self._list_dir(path)
+                if listed is None:
+                    return
+                files, dirs = listed
+                if files:
+                    segments.append((pipeline, derivative, [(None, None, None, files)]))
+                for name, p in dirs:
+                    if 'sourcedata' in name or (skip_derivs and name == 'derivatives'):
                         continue
-                    add_file(os.path.join(root, f), pipeline=pipeline, derivative=True,
-                             subject=subject, session=session, datatype=datatype)
-
-        import pandas as pd
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df = df.dropna(subset=['subject']).drop_duplicates(subset=['path']).reset_index(drop=True)
-            self.subject_ids = sorted(df['subject'].unique().tolist())
-        else:
+                    s = se = None
+                    h = name[:4]
+                    if h == 'sub-':
+                        s = name[4:]
+                    elif h == 'ses-':
+                        se = name[4:]
+                    segments.append((pipeline, derivative,
+                                     pool.submit(self._walk_subtree, p, s, se, None, skip_derivs, [])))
+ 
+            if not ('sourcedata' in db_root or '/derivatives/' in db_root
+                    or db_root.endswith('/derivatives')):
+                plan(db_root, None, False, True)
+ 
+            derivatives_root = os.path.join(db_root, 'derivatives')
+            if 'sourcedata' not in derivatives_root and os.path.isdir(derivatives_root):
+                listed = self._list_dir(derivatives_root)
+                if listed is not None:
+                    for name, p in listed[1]:
+                        if 'sourcedata' not in name:
+                            plan(p, name, True, False)
+ 
+            c_path, c_subj, c_ses, c_dt = [], [], [], []
+            c_pipe, c_deriv, c_ext, c_suf = [], [], [], []
+            ent_cols = {}
+            a_path, a_subj, a_ses, a_dt = c_path.append, c_subj.append, c_ses.append, c_dt.append
+            a_pipe, a_deriv, a_ext, a_suf = c_pipe.append, c_deriv.append, c_ext.append, c_suf.append
+            reserved = self._RESERVED
+            nan = self._NAN
+            i = 0
+ 
+            for pipeline, derivative, seg in segments:
+                if not isinstance(seg, list):
+                    seg = seg.result()
+                for subject, session, datatype, files in seg:
+                    for name, path in files:
+                        dot = name.find('.')
+                        if dot >= 0:
+                            ext = name[dot:]
+                            parts = name[:dot].split('_')
+                        else:
+                            ext = ''
+                            parts = name.split('_')
+                        subj = subject
+                        ses = session
+                        suffix_ent = None
+                        for p in parts:
+                            head = p[:4]
+                            if head == 'sub-':
+                                subj = p[4:]
+                            elif head == 'ses-':
+                                if not ses:
+                                    ses = p[4:]
+                            else:
+                                k, sep, v = p.partition('-')
+                                if sep:
+                                    if k in reserved:
+                                        if k == 'suffix':
+                                            suffix_ent = v
+                                        continue
+                                    col = ent_cols.get(k)
+                                    if col is None:
+                                        col = ent_cols[k] = [nan] * i
+                                    else:
+                                        n = len(col)
+                                        if n > i:
+                                            col[i] = v
+                                            continue
+                                        if n < i:
+                                            col.extend([nan] * (i - n))
+                                    col.append(v)
+                        last = parts[-1]
+                        if '-' in last and suffix_ent is not None:
+                            last = suffix_ent
+                        a_path(path); a_subj(subj); a_ses(ses); a_dt(datatype)
+                        a_pipe(pipeline); a_deriv(derivative); a_ext(ext); a_suf(last)
+                        i += 1
+ 
+        n = i
+        if n == 0:
             self.subject_ids = []
-        self._df = df
+            self._df = pd.DataFrame()
+            return self._df
+ 
+        data = {'path': c_path, 'subject': c_subj, 'session': c_ses, 'datatype': c_dt,
+                'pipeline': c_pipe, 'derivative': c_deriv, 'extension': c_ext, 'suffix': c_suf}
+        for k, col in ent_cols.items():
+            if len(col) < n:
+                col.extend([nan] * (n - len(col)))
+            data[k] = col
+ 
+        self._df = pd.DataFrame(data)
+        self.subject_ids = sorted(set(c_subj))
         return self._df
-
+    
     def _apply_filters(self, df, kwargs):
         if df.empty or not kwargs:
             return df

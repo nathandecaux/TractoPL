@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument('--subject','-s', required=True, help='Subject ID to process.')
     parser.add_argument('--db-root','-d', required=True, help='Path to the BIDS database root.')
     parser.add_argument('--keep-intermediate', action='store_true', help='Keep intermediate files.')
+    parser.add_argument('--force', action='store_true', help='Force reprocessing even if intermediate files exist.')
     return parser.parse_args()
 
 def init_pipeline(subject, pipeline, **kwargs):
@@ -81,7 +82,8 @@ def register_template_to_anat(subject, pipeline, atlas, **kwargs):
     # Load the anatomical image
     anat = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
 
-    if len(subject.get(pipeline=pipeline, suffix='anat', desc='Warped', extension='nii.gz')) > 0:
+
+    if len(subject.get(pipeline=pipeline, suffix='xfm', desc='0GenericAffine', extension='mat')) > 0:
         print('Registration already done, skipping')
         return True
 
@@ -239,44 +241,60 @@ def apply_trans_to_HCP_clusters(subject, pipeline, atlas, overwrite=True, **kwar
         res_dict[output_path] = output_entities
         copy_from_dict(subject,res_dict,pipeline="bundle_seg",remove_after_copy=False)
 
-def generate_cluster_and_apply_transformation(subject, atlas, pipeline='bundle_seg', clustering_method="centroid", **kwargs):
+from multiprocessing.pool import ThreadPool
+
+def generate_cluster_and_apply_transformation(subject, atlas, pipeline='bundle_seg',
+                                              clustering_method="centroid", **kwargs):
     out_dir = kwargs.get('out_dir', tempfile.mkdtemp())
 
     moving_space = atlas.name
-    # Load the transformation matrix
-    inv_warp=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
-    affine=subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='0GenericAffine')
+    inv_warp = subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
+    affine = subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='0GenericAffine')
 
     moving_image = atlas.reference
     fixed_image = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
 
-    for b_name,hcp_name in tqdm(atlas.bundle_mapping.items(), desc="Processing bundles"):
-        res_dict = {}
+    def _do_bundle(b_name, hcp_name):
         print(f"Generating centroid for bundle {b_name}")
         b_path = glob(str(atlas.bundles_pattern).replace("{BUNDLE}", hcp_name))
-        if len(b_path) == 0 or len(b_path) > 1:
+        if len(b_path) != 1:
             raise ValueError(f"Expected exactly one bundle for {hcp_name}, found {len(b_path)}")
         b_path = b_path[0]
 
         if clustering_method == "centroid":
-        #Get relevant kwargs
             longest_frac = kwargs.get('longest_frac', 0.5)
             resample_points = kwargs.get('resample_points', 24)
-            cmd=f"tractopl-generate-centroid --out-dir {out_dir} --longest-frac {longest_frac} --resample-points {resample_points} {b_path}"
+            cmd = (f"tractopl-generate-centroid --out-dir {out_dir} "
+                   f"--longest-frac {longest_frac} --resample-points {resample_points} {b_path}")
             call(cmd, shell=True)
             centroid_path = glob(os.path.join(out_dir, f"*{hcp_name}*centroids.vtk"))[0]
+        else:
+            raise NotImplementedError(f"Unsupported clustering_method: {clustering_method}")
 
-        output_entities = upt_dict(subject.get_unique(suffix='tracto', pipeline='msmt_csd', label='brain',algo='ifod2',extension='tck').get_full_entities(), {'bundle': b_name.replace('_',''), "datatype":'atlas', 'space': 'subject', 'atlas': moving_space, 'desc': 'transformed', 'suffix': 'centroids', 'extension': 'vtk','clustering': clustering_method})
+        output_entities = upt_dict(
+            subject.get_unique(suffix='tracto', pipeline='msmt_csd', label='brain',
+                               algo='ifod2', extension='tck').get_full_entities(),
+            {'bundle': b_name.replace('_', ''), "datatype": 'atlas', 'space': 'subject',
+             'atlas': moving_space, 'desc': 'transformed', 'suffix': 'centroids',
+             'extension': 'vtk', 'clustering': clustering_method})
 
         output_path = os.path.join(out_dir, f"{subject.sub_id}_transformed_{b_name}.vtk")
-  
-        cmd = f"tractopl-apply-trans-to-vtk {centroid_path} -o {output_path} -t {affine.path} --invert-affine -t {inv_warp.path} --moving-image {moving_image} --fixed-image {fixed_image}"
+        cmd = (f"tractopl-apply-trans-to-vtk {centroid_path} -o {output_path} "
+               f"-t {affine.path} --invert-affine -t {inv_warp.path} "
+               f"--moving-image {moving_image} --fixed-image {fixed_image}")
         print(cmd)
         call(cmd, shell=True)
-        res_dict[output_path] = output_entities
-        copy_from_dict(subject,res_dict,pipeline="bundle_seg",remove_after_copy=False)
-    
- 
+        return {output_path: output_entities}
+
+    # One pool, all bundles submitted, real parallelism
+    with ThreadPool(processes=os.cpu_count() // 2) as pool:
+        results = pool.starmap(_do_bundle, atlas.bundle_mapping.items())
+
+    # Single-threaded merge + copy (avoids racing on `subject`)
+    res_dict = {}
+    for r in results:
+        res_dict.update(r)
+    copy_from_dict(subject, res_dict, pipeline="bundle_seg", remove_after_copy=False)
 
 
 
@@ -303,14 +321,26 @@ def run_tractosearch_on_registered_atlas(subject, atlas, pipeline='bundle_seg', 
         bundle2reg = bundle2seg
         model_dict = {}
 
+    transforms_workers = []
+    i=0
     #Apply transformation to the atlas bundles to the subject space, in a temporary directory
     for b_name, hcp_name in bundle2reg.items():
         model_bundle_path = glob(str(atlas.bundles_pattern).replace("{BUNDLE}", hcp_name))
         if len(model_bundle_path) == 0 or len(model_bundle_path) > 1:
             raise ValueError(f"Expected exactly one model bundle for {hcp_name}, found {len(model_bundle_path)}")
-        moved_model=_apply_trans_to_atlas_bundle(subject, pipeline, str(model_bundle_path[0]), str(atlas.reference))
-        model_dict[b_name] = moved_model
+        
+        #moved_model=_apply_trans_to_atlas_bundle(subject, pipeline, str(model_bundle_path[0]), str(atlas.reference))
+        # model_dict[b_name] = moved_model
+        model_dict[b_name]=i
+        i+=1
+        transforms_workers.append((subject, pipeline, str(model_bundle_path[0]), str(atlas.reference)))
 
+    p=multiprocessing.Pool(os.cpu_count()//2)
+    moved_models=p.starmap(_apply_trans_to_atlas_bundle, transforms_workers)
+    for b_name, idx in model_dict.items():
+        if isinstance(idx, int):
+            model_dict[b_name] = moved_models[idx]
+    
     print("Already done bundles:", already_done)
 
     print(f'Processing {len(model_dict)} bundles with TractoSearch')
