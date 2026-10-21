@@ -648,14 +648,15 @@ def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_mo
     elif step == 'projection':
         pipeline_list = ['mcm_to_bundleseg_tracts']
         estimation_options = None
-    process_subject(
+    if process_subject(
         subject,
         dataset_path,
         pipeline_name,
         pipeline_list=pipeline_list,
         estimation_options=estimation_options,
         bundle_pipeline=bundle_pipeline,
-    )
+    ) is None:
+        sys.exit(1)
 
 
 

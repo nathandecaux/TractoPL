@@ -10,17 +10,25 @@ Usage:
     streamlit run TractoPL/dashboard/streamlit_launcher.py
 """
 
+import copy
 import glob
+import json
 import os
+import signal
+import socket
 import shlex
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
+from TractoPL.dashboard import job_runner
 from TractoPL.data.loader import Dataset
 
 CHECKOUT = Path(__file__).resolve().parents[2]
@@ -33,6 +41,11 @@ TRACTOPL_COMMANDS = [
     'tractopl-tractometry',
 ]
 
+PREPROCESSING_STEPS = {
+    'anima': 'animaPreprocessing (correction, brain mask)',
+    'dti': 'DTI estimation',
+    'fa': 'FA map',
+}
 MSMT_STEPS = [
     'response',
     'fod',
@@ -44,6 +57,10 @@ MSMT_STEPS = [
 COMPARTMENT_TYPES = {1: 'Stick', 2: 'Zeppelin', 3: 'Tensor', 4: 'NODDI', 5: 'DDI'}
 ML_MODES = {0: 'Marginal likelihood', 1: 'Profile likelihood', 2: 'Variable projection'}
 OPTIMIZERS = ['levenberg', 'bobyqa', 'ccsaq', 'bfgs']
+
+# Local workdir where the launcher remembers the settings of previous sessions.
+WORKDIR = Path(os.environ.get('TRACTOPL_LAUNCHER_WORKDIR', Path(__file__).resolve().parent / 'launcher_workdir'))
+SETTINGS_FILE = WORKDIR / 'settings.json'
 
 
 # =============================================================================
@@ -64,6 +81,12 @@ class Check(NamedTuple):
     pattern: Optional[str] = None  # glob for files the index skips, e.g. sourcedata
 
 
+@st.cache_data(show_spinner=False, max_entries=512)
+def _cached_counts(_dataset: Dataset, index_id: int, check: Check, subjects: Tuple[str, ...]) -> Dict[str, int]:
+    """Counts for one dataset index; a new index (Refresh dataset) gets a new id."""
+    return count_matches(_dataset, check, list(subjects))
+
+
 def count_matches(dataset: Dataset, check: Check, subjects: List[str]) -> Dict[str, int]:
     """Count the files matching a check for each participant."""
     if check.pattern:
@@ -82,7 +105,7 @@ def check_table(dataset: Dataset, checks: List[Check], subjects: List[str]) -> p
     """Return one row per participant and one boolean column per check."""
     table = pd.DataFrame(index=subjects)
     for check in checks:
-        counts = count_matches(dataset, check, subjects)
+        counts = _cached_counts(dataset, id(dataset), check, tuple(subjects))
         table[check.label] = [counts[subject] >= check.min_count for subject in subjects]
     return table
 
@@ -104,6 +127,10 @@ def preproc_bvec():
 
 def brain_mask():
     return Check('Brain mask', dict(pipeline='preprocessing', suffix='mask', label='brain', space='B0'))
+
+
+def dti_tensors():
+    return Check('DTI', dict(pipeline='preprocessing', model='DTI', metric='!*', extension='nii.gz'))
 
 
 def fa_map():
@@ -146,21 +173,29 @@ def metric_bundles(pipeline):
 def step_io(step: str, params: Dict[str, Any]):
     """Return the (inputs, outputs) checks of a step with the current options."""
     if step == 'preprocessing':
-        inputs = [
-            Check('Raw DWI', dict(scope='raw', suffix='dwi', extension='nii.gz', desc='!*')),
-            Check('Raw bval/bvec', dict(scope='raw', suffix='dwi', extension=['.bval', '.bvec']), 2),
-            Check('T1w', dict(scope='raw', suffix='T1w', extension='nii.gz')),
-            Check('DICOMs', pattern='{root}/sub-{sub}/sourcedata/sub-{sub}_dicoms/**/*'),
-        ]
-        if params['with_reversed_b0']:
-            inputs.append(Check('Reversed B0', dict(scope='raw', desc='b0reversed', extension='nii.gz')))
-        outputs = [
-            preproc_dwi(),
-            preproc_bvec(),
-            brain_mask(),
-            Check('DTI', dict(pipeline='preprocessing', model='DTI', metric='!*', extension='nii.gz')),
-            fa_map(),
-        ]
+        steps = params['preprocessing_steps']
+        inputs: List[Check] = []
+        outputs: List[Check] = []
+        # Inputs of a sub-step that an earlier selected sub-step writes are not checked.
+        if 'anima' in steps:
+            inputs += [
+                Check('Raw DWI', dict(scope='raw', suffix='dwi', extension='nii.gz', desc='!*')),
+                Check('Raw bval/bvec', dict(scope='raw', suffix='dwi', extension=['.bval', '.bvec']), 2),
+                Check('T1w', dict(scope='raw', suffix='T1w', extension='nii.gz')),
+                Check('DICOMs', pattern='{root}/sub-{sub}/sourcedata/sub-{sub}_dicoms/**/*'),
+            ]
+            if params['with_reversed_b0']:
+                inputs.append(Check('Reversed B0', dict(scope='raw', desc='b0reversed', extension='nii.gz')))
+
+            outputs += [preproc_dwi(), preproc_bvec(), brain_mask()]
+        if 'dti' in steps:
+            if 'anima' not in steps:
+                inputs += [preproc_dwi(), preproc_bvec(), raw_bval()]
+            outputs.append(dti_tensors())
+        if 'fa' in steps:
+            if 'dti' not in steps:
+                inputs.append(dti_tensors())
+            outputs.append(fa_map())
         return inputs, outputs
 
     if step == 'msmt_csd':
@@ -168,7 +203,7 @@ def step_io(step: str, params: Dict[str, Any]):
         tissues = ['WM', 'GM', 'CSF']
         by_step = {
             'response': Check('Responses', dict(pipeline=pipeline, suffix='response', label=tissues), 3),
-            'fod': Check('FODs', dict(pipeline=pipeline, suffix='fod', label=tissues), 3),
+            'fod': Check('FODs', dict(pipeline=pipeline, suffix='fod', label='WM')),
             'fixels': Check('Fixels', dict(pipeline=pipeline, extension='fixel', label='WM')),
             'fixels2peaks': Check('Fixel peaks', dict(pipeline=pipeline, suffix='peaks', label='WM',
                                                       desc='fixels2peaks')),
@@ -225,8 +260,14 @@ def build_command(step: str, subject: str, params: Dict[str, Any]) -> List[str]:
 
     if step == 'preprocessing':
         command = ['tractopl-preprocessing'] + common
-        if not params['with_reversed_b0']:
+        if 'anima' in params['preprocessing_steps'] and not params['with_reversed_b0']:
             command.append('--without-reversed-b0')
+        if not params['flip_bvec_checkbox']:
+            command.append('--no-flip-bvec')
+        else:
+            command += ['--flip-bvec', str(params['flip_bvec'])]
+        for preprocessing_step in params['preprocessing_steps']:
+            command += ['--step', preprocessing_step]
         return command
 
     if step == 'msmt_csd':
@@ -282,7 +323,8 @@ def build_command(step: str, subject: str, params: Dict[str, Any]) -> List[str]:
         ]
 
     raise ValueError(f"Unknown step: {step}")
-
+from pathlib import Path
+# home = Path.home()
 
 def apptainer_prefix(execution: Dict[str, Any]) -> List[str]:
     """Return `apptainer exec` with the dataset, atlas, and checkout mounted."""
@@ -291,7 +333,7 @@ def apptainer_prefix(execution: Dict[str, Any]) -> List[str]:
         binds.append(os.path.dirname(os.path.abspath(execution['atlas'])))
     # --pwd keeps the host working directory from shadowing the mounted checkout
     # on sys.path (the image wrappers use `python -m`).
-    prefix = ['apptainer', 'exec', '--cleanenv', '--writable-tmpfs', '--pwd', '/tmp']
+    prefix = ['apptainer', 'exec', '--cleanenv', '--writable-tmpfs', '--pwd', '/tmp', '--bind', Path.home().as_posix()+':'+Path.home().as_posix(),'--bind','/home/ndecaux:/home/ndecaux']
     for path in dict.fromkeys(binds):
         prefix += ['--bind', f'{path}:{path}']
     prefix += [
@@ -335,43 +377,634 @@ def probe_image(execution: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def run_command(command: List[str], output_area) -> tuple:
-    """Run one command, stream its output into the page, and return (code, log)."""
-    lines: List[str] = []
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    for line in process.stdout:
-        lines.append(line.rstrip())
-        output_area.code('\n'.join(lines[-200:]), language='text')
-    return process.wait(), '\n'.join(lines[-200:])
+def submit_job(log_root: str, workers: int, tasks: List[Dict[str, Any]]) -> str:
+    """Start a detached runner; it keeps going if the dashboard is closed."""
+    job_id = time.strftime('%Y%m%d-%H%M%S')
+    log_root_path = Path(log_root).expanduser().resolve()
+    job_dir = log_root_path / job_id
+    suffix = 1
+    while job_dir.exists():
+        suffix += 1
+        job_dir = log_root_path / f'{job_id}-{suffix}'
+    job_dir.mkdir(parents=True)
+    (job_dir / 'job.json').write_text(json.dumps({'workers': workers, 'tasks': tasks}, indent=1))
+    # Locate the runner through the imported package, not the launcher's own path,
+    # so it works wherever streamlit was started from.
+    runner = Path(job_runner.__file__).resolve()
+    with open(job_dir / 'runner.log', 'w') as runner_log:
+        process = subprocess.Popen(
+            [sys.executable, str(runner), str(job_dir)],
+            stdout=runner_log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True, cwd=str(CHECKOUT),
+        )
+    # Reap the runner when it exits, otherwise it stays a zombie that looks alive.
+    threading.Thread(target=process.wait, daemon=True).start()
+    return job_dir.name
+
+
+def read_json(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def runner_alive(state: Dict[str, Any]) -> Optional[bool]:
+    """Whether the runner of a job still runs; None when it cannot be told from here.
+
+    The pid is checked only on the host that started the runner, and must still
+    be a job runner (not a zombie or a recycled pid). Elsewhere the heartbeat
+    the runner refreshes every few seconds is used.
+    """
+    pid = state.get('pid')
+    if pid and state.get('host', socket.gethostname()) == socket.gethostname():
+        try:
+            fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+            cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()
+        except OSError:
+            return False
+        return fields[0] != 'Z' and b'job_runner' in cmdline
+    heartbeat = state.get('heartbeat')
+    if heartbeat is None:
+        return None
+    return time.time() - heartbeat < 6 * job_runner.HEARTBEAT_SECONDS
+
+
+def tail(path: Path, max_lines: int = 400) -> str:
+    """Last lines of a log; reread only when the file changed."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return '(no log yet)'
+    return _tail(str(path), stat.st_size, stat.st_mtime_ns, max_lines)
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _tail(path: str, size: int, mtime_ns: int, max_lines: int, max_bytes: int = 256 * 1024) -> str:
+    """Read at most `max_bytes` from the end of a log."""
+    path = Path(path)
+    try:
+        with path.open('rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except OSError:
+        return '(no log yet)'
+    lines = data.decode(errors='replace').splitlines()
+    if size > max_bytes:
+        lines = lines[1:]  # first line is probably cut
+    return '\n'.join(lines[-max_lines:])
+
+
+STATUS_ICONS = {'pending': '⏳', 'running': '🔄', 'success': '✅', 'failed': '❌',
+                'skipped': '⏭️', 'cancelled': '🛑', 'interrupted': '⚠️', 'starting': '🔄',
+                'cancelling': '🛑'}
+ACTIVE = ('starting', 'running', 'cancelling')
+# Statuses removed by "Delete failed jobs" and relaunched by "Relaunch".
+FINISHED_BAD = ('failed', 'cancelled', 'interrupted')
+RETRY_TASKS = ('failed', 'skipped', 'cancelled', 'interrupted')
+STARTUP_GRACE_SECONDS = 60
+
+
+class Job(NamedTuple):
+    path: Path
+    status: str
+    state: Dict[str, Any]
+    tasks: List[Dict[str, Any]]
+
+
+def load_job(job_dir: Path) -> Job:
+    """Read a job directory and work out its real status.
+
+    A runner killed without cleaning up (reboot, kill -9) leaves "running" in
+    state.json: such jobs and their unfinished tasks are shown as interrupted.
+    """
+    state = read_json(job_dir / 'state.json', None)
+    if state is None:
+        try:
+            age = time.time() - (job_dir / 'job.json').stat().st_mtime
+        except OSError:
+            age = 0
+        status = 'starting' if age < STARTUP_GRACE_SECONDS else 'interrupted'
+        spec = read_json(job_dir / 'job.json', {})
+        tasks = [{'subject': t['subject'], 'step': t['step'], 'status': 'pending' if status == 'starting'
+                  else 'interrupted', 'log': job_runner.task_log_name(t)} for t in spec.get('tasks', [])]
+        return Job(job_dir, status, {}, tasks)
+    status = state.get('status', 'running')
+    tasks = [dict(task) for task in state.get('tasks', [])]
+    if status == 'running':
+        if runner_alive(state) is False:
+            status = 'interrupted'
+            for task in tasks:
+                if task['status'] in ('pending', 'running'):
+                    task['status'] = 'interrupted'
+        elif job_runner.cancel_file(job_dir).exists():
+            status = 'cancelling'
+    return Job(job_dir, status, state, tasks)
+
+
+def list_jobs(log_root: str) -> List[Job]:
+    """All jobs of a log directory; shared by the job watcher and the Jobs page."""
+    return [Job(Path(path), status, state, tasks) for path, status, state, tasks in _list_jobs(log_root)]
+
+
+@st.cache_data(ttl=2, show_spinner=False)
+def _list_jobs(log_root: str) -> List[tuple]:
+    # Plain tuples: the script runs as __main__, so Job itself cannot be pickled.
+    root = Path(log_root)
+    if not root.is_dir():
+        return []
+    dirs = sorted((d for d in root.iterdir() if (d / 'job.json').is_file()), reverse=True)
+    return [(str(job.path), job.status, job.state, job.tasks) for job in map(load_job, dirs)]
+
+
+def request_cancel(job: Job, subject: Optional[str] = None) -> None:
+    """Ask the runner to stop the job (or one participant).
+
+    The cancel file works whatever host runs the job; the signal is a faster
+    path when the runner runs on this host.
+    """
+    job_runner.cancel_file(job.path, subject).touch()
+    if subject is None and job.state.get('host', socket.gethostname()) == socket.gethostname() \
+            and runner_alive(job.state):
+        try:
+            os.kill(job.state['pid'], signal.SIGTERM)
+        except (OSError, KeyError):
+            pass
+
+
+def delete_job(job: Job) -> None:
+    shutil.rmtree(job.path, ignore_errors=True)
+
+
+def relaunch_job(job: Job, log_root: str) -> Optional[str]:
+    """Start a new job with the tasks that did not succeed, in their order."""
+    spec = read_json(job.path / 'job.json', {})
+    retry = {(t['subject'], t['step']) for t in job.tasks if t['status'] in RETRY_TASKS}
+    tasks = [t for t in spec.get('tasks', []) if (t['subject'], t['step']) in retry]
+    if not tasks:
+        return None
+    return submit_job(log_root, int(spec.get('workers', 1)), tasks)
+
+
+def format_duration(task: Dict[str, Any]) -> str:
+    started = task.get('started')
+    if not started:
+        return ''
+    seconds = int((task.get('ended') or time.time()) - started)
+    hours, rest = divmod(seconds, 3600)
+    return f' · {hours}h{rest // 60:02d}' if hours else f' · {rest // 60}m{rest % 60:02d}s'
+
+
+# =============================================================================
+# Notifications
+# =============================================================================
+
+NOTIFICATION_HISTORY = 50
+TERMINAL_TASK = {'success', 'failed', 'cancelled', 'interrupted'}
+
+
+def notify(message: str, icon: str = 'ℹ️', duration: str = 'short') -> None:
+    """Queue a toast; it survives the st.rerun() that usually follows an action."""
+    st.session_state.setdefault('pending_toasts', []).append((message, icon, duration))
+    history = st.session_state.setdefault('notification_history', [])
+    history.insert(0, (time.strftime('%H:%M:%S'), icon, message))
+    del history[NOTIFICATION_HISTORY:]
+
+
+def flush_notifications() -> None:
+    for message, icon, duration in st.session_state.pop('pending_toasts', []):
+        st.toast(message, icon=icon, duration=duration)
+
+
+def jobs_changed() -> None:
+    """Forget the cached job list after an action on the log directory."""
+    _list_jobs.clear()
+
+
+def snapshot(jobs: List[Job]) -> Dict[str, Dict[str, Any]]:
+    return {job.path.name: {'status': job.status,
+                            'tasks': {(t['subject'], t['step']): t['status'] for t in job.tasks}}
+            for job in jobs}
+
+
+def job_summary(job: Job) -> str:
+    counts = {status: sum(t['status'] == status for t in job.tasks) for status in STATUS_ICONS}
+    parts = [f"{counts['success']}/{len(job.tasks)} succeeded"]
+    parts += [f'{counts[status]} {status}' for status in ('failed', 'cancelled', 'interrupted') if counts[status]]
+    return ', '.join(parts)
+
+
+def detect_job_events(log_root: str, jobs: List[Job]) -> None:
+    """Notify the changes since the previous look at the log directory.
+
+    The first look at a directory only records the state, so old jobs are not announced.
+    """
+    current = snapshot(jobs)
+    previous_root, previous = st.session_state.get('job_snapshot', (None, None))
+    st.session_state['job_snapshot'] = (log_root, current)
+    if previous is None or previous_root != log_root:
+        return
+    announced = st.session_state.setdefault('announced_jobs', set())
+    for job in jobs:
+        name = job.path.name
+        before = previous.get(name)
+        if before is None:
+            if name not in announced and job.status in ACTIVE:
+                notify(f'Job {name} started ({len(job.tasks)} task(s)).', '🚀')
+            announced.add(name)
+            before = {'status': None, 'tasks': {}}
+        for (subject, step), status in current[name]['tasks'].items():
+            if status != before['tasks'].get((subject, step)) and status in TERMINAL_TASK:
+                notify(f'sub-{subject} · {step}: {status}', STATUS_ICONS[status],
+                       'short' if status == 'success' else 'long')
+        if job.status != before['status'] and job.status not in ACTIVE:
+            notify(f'Job {name} {job.status}: {job_summary(job)}.',
+                   STATUS_ICONS.get(job.status, '⚠️'), 'long')
+
+
+def job_watcher(log_root: str) -> None:
+    """Sidebar summary of the jobs; notifies their changes on every page."""
+    jobs = list_jobs(log_root)
+    detect_job_events(log_root, jobs)
+    flush_notifications()
+    active = [job for job in jobs if job.status in ACTIVE]
+    running_tasks = sum(t['status'] == 'running' for job in active for t in job.tasks)
+    st.caption(f'🔄 {len(active)} active job(s), {running_tasks} running task(s)' if active
+               else 'No active job.')
+    history = st.session_state.get('notification_history', [])
+    with st.expander(f'Notifications ({len(history)})'):
+        if not history:
+            st.caption('Nothing yet.')
+        for stamp, icon, message in history:
+            st.caption(f'{stamp} {icon} {message}')
+        if history and st.button('Clear notifications', key='clear_notifications'):
+            st.session_state['notification_history'] = []
+            st.rerun()
+
+
+def render_jobs(log_root: str) -> None:
+    """One card per participant/step, reloaded from the log directory."""
+    jobs = list_jobs(log_root)
+    bad_jobs = [job for job in jobs if job.status in FINISHED_BAD]
+
+    toolbar = st.columns([2, 2, 3])
+    show_closed = toolbar[0].checkbox('Show closed cards', value=False, key='show_closed')
+    hide_success = toolbar[1].checkbox('Hide successful jobs', value=False, key='hide_success')
+    with toolbar[2].popover(f'🗑️ Delete failed / interrupted jobs ({len(bad_jobs)})',
+                            disabled=not bad_jobs):
+        st.write(f'Delete {len(bad_jobs)} job folder(s) and their logs from {log_root}?')
+        st.caption(', '.join(job.path.name for job in bad_jobs))
+        if st.button('Delete', type='primary', key='delete_bad_jobs'):
+            for job in bad_jobs:
+                delete_job(job)
+            jobs_changed()
+            notify(f'Deleted {len(bad_jobs)} failed / interrupted job(s).', '🗑️')
+            st.rerun()
+
+    if not jobs:
+        st.caption(f'No job found in {log_root}.')
+        return
+    for job in jobs:
+        if hide_success and job.status == 'success':
+            continue
+        render_job(job, log_root, show_closed)
+
+
+def render_job(job: Job, log_root: str, show_closed: bool) -> None:
+    name = job.path.name
+    closed = set(read_json(job.path / 'closed.json', []))
+    counts = {status: sum(t['status'] == status for t in job.tasks) for status in STATUS_ICONS}
+    with st.expander(
+        f"{STATUS_ICONS.get(job.status, '⚠️')} Job {name} — {job.status} "
+        f"({counts['success']}/{len(job.tasks)} done, {counts['running']} running, "
+        f"{counts['failed']} failed)",
+        expanded=job.status in ACTIVE,
+    ):
+        st.caption(f"{job.path}" + (f" · host {job.state['host']}, pid {job.state.get('pid')}"
+                                     if job.state.get('host') else ''))
+        actions = st.columns(4)
+        if job.status in ('running', 'starting') and actions[0].button('Cancel job', key=f'cancel_{name}'):
+            request_cancel(job)
+            jobs_changed()
+            notify(f'Cancellation requested for job {name}.', '🛑')
+            st.rerun()
+        if job.status not in ACTIVE:
+            if any(t['status'] in RETRY_TASKS for t in job.tasks) and \
+                    actions[1].button('Relaunch unfinished tasks', key=f'relaunch_{name}'):
+                new_job = relaunch_job(job, log_root)
+                if new_job:
+                    st.session_state.setdefault('announced_jobs', set()).add(new_job)
+                    notify(f'Job {new_job} started: unfinished tasks of {name}.', '🚀')
+                jobs_changed()
+                st.rerun()
+            if actions[2].button('Delete job', key=f'delete_{name}'):
+                delete_job(job)
+                jobs_changed()
+                notify(f'Job {name} deleted.', '🗑️')
+                st.rerun()
+        if job.state.get('error'):
+            st.error('The runner crashed.')
+            st.code(job.state['error'], language='text')
+        if job.status == 'interrupted':
+            st.warning('The runner stopped without finishing (killed or machine restarted).')
+        if not job.tasks or job.status == 'interrupted' and not job.state:
+            with st.expander('Runner log'):
+                st.code(tail(job.path / 'runner.log'), language='text')
+
+        for task in job.tasks:
+            card_id = f"{task['subject']}_{task['step']}"
+            if card_id in closed and not show_closed:
+                continue
+            render_task(job, task, card_id, closed)
+
+
+def render_task(job: Job, task: Dict[str, Any], card_id: str, closed: set) -> None:
+    name = job.path.name
+    with st.container(border=True):
+        title, cancel, close = st.columns([6, 1, 1])
+        code = task.get('returncode')
+        title.markdown(
+            f"{STATUS_ICONS.get(task['status'], '⚠️')} **sub-{task['subject']}** · {task['step']} · "
+            f"{task['status']}" + (f' (exit {code})' if code not in (None, 0) else '')
+            + format_duration(task)
+        )
+        if job.status == 'running' and task['status'] in ('pending', 'running'):
+            if job_runner.cancel_file(job.path, task['subject']).exists():
+                cancel.caption('Cancelling…')
+            elif cancel.button('Cancel', key=f'cancel_{name}_{card_id}',
+                               help='Stops this participant (this step and the next ones).'):
+                request_cancel(job, task['subject'])
+                notify(f"Cancellation requested for sub-{task['subject']} in job {name}.", '🛑')
+                st.rerun()
+        if card_id in closed:
+            if close.button('Reopen', key=f'open_{name}_{card_id}'):
+                write_closed(job.path, closed - {card_id})
+                notify(f"Card sub-{task['subject']} · {task['step']} reopened.", '📂')
+                st.rerun()
+        elif close.button('Close', key=f'close_{name}_{card_id}'):
+            write_closed(job.path, closed | {card_id})
+            notify(f"Card sub-{task['subject']} · {task['step']} closed.", '📁')
+            st.rerun()
+        log_path = job.path / task['log']
+        if task['status'] in ('pending', 'skipped') and not log_path.is_file():
+            return
+        with st.expander('Logs', expanded=task['status'] in ('running', 'failed')):
+            st.code(tail(log_path), language='text')
+            if log_path.is_file():
+                st.download_button('Download full log', log_path.read_bytes,
+                                   file_name=f'{name}_{task["log"]}',
+                                   key=f'dl_{name}_{card_id}', on_click='ignore')
+
+
+def write_closed(job_dir: Path, closed: set) -> None:
+    (job_dir / 'closed.json').write_text(json.dumps(sorted(closed)))
 
 
 def pipeline_selector(label: str, default: str, key: str) -> str:
     """Select a derivative pipeline, allowing one that does not exist yet."""
-    preferred = st.session_state.get(key, default)
+    preferred = st.session_state.get(key) or default
     options = sorted(set(DERIVATIVES) | {default, preferred})
-    return st.selectbox(label, options, index=options.index(preferred), key=key)
+    st.session_state[key] = preferred
+    return st.selectbox(label, options, key=key)
+
+
+# =============================================================================
+# Remembered settings
+# =============================================================================
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+def _flag(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+def _choice(options) -> Any:
+    options = list(options)
+    return lambda value: value in options and not isinstance(value, bool)
+
+
+def _subset(options) -> Any:
+    options = list(options)
+    return lambda value: isinstance(value, list) and all(item in options for item in value)
+
+
+def _number(low: int, high: int) -> Any:
+    return lambda value: isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+# Widget key -> validator; a saved value is only restored when it is still valid.
+COMMON_SETTINGS = {
+    'db_root_input': _text,
+    'atlas_input': _text,
+    'n_workers': _number(1, 64),
+    'mode': _choice(['Local', 'Apptainer']),
+    'image_path': _text,
+    'checkout_path': _text,
+    'pip_install': _flag,
+    **{f'include_{step}': _flag for step in (
+        'preprocessing', 'msmt_csd', 'mcm_estimation', 'bundle_seg', 'mcm_projection', 'tractometry')},
+    'preprocessing_steps': _subset(PREPROCESSING_STEPS),
+    'with_reversed_b0': _flag,
+    'flip_bvec_checkbox': _flag,
+    'flip_bvec': _number(0, 2),
+    'msmt_pipeline': _text,
+    'n_streamlines': _number(1000, 10_000_000),
+    'msmt_steps': _subset(MSMT_STEPS),
+    'force': _flag,
+    'mcm_pipeline': _text,
+    'tensor_model': _choice(COMPARTMENT_TYPES),
+    'model_selection': _flag,
+    'n_comparts': _number(1, 5),
+    'free_water': _flag,
+    'restricted_water': _flag,
+    'stanisz': _flag,
+    'stationary_water': _flag,
+    'ml_mode': _choice(ML_MODES),
+    'optimizer': _choice(OPTIMIZERS),
+    'n_threads': _number(0, 256),
+    'keep_intermediate': _flag,
+    'projection_mcm_pipeline': _text,
+    'projection_bundle_pipeline': _text,
+    'tractometry_pipeline': _text,
+    'clustering_method': _choice(['centroid', 'parcellation']),
+    'tractometry_mcm_pipeline': _text,
+    'tractometry_bundle_pipeline': _text,
+    'n_pts': _number(10, 500),
+}
+DEFAULTS: Dict[str, Any] = {
+    'n_workers': 1,
+    'mode': 'Local',
+    'pip_install': True,
+    **{key: True for key in COMMON_SETTINGS if key.startswith('include_')},
+    'preprocessing_steps': list(PREPROCESSING_STEPS),
+    'with_reversed_b0': True,
+    'flip_bvec_checkbox': True,
+    'flip_bvec': 1,
+    'n_streamlines': 1_000_000,
+    'msmt_steps': list(MSMT_STEPS),
+    'force': False,
+    'tensor_model': 3,
+    'model_selection': False,
+    'n_comparts': 3,
+    'free_water': True,
+    'restricted_water': True,
+    'stanisz': False,
+    'stationary_water': False,
+    'ml_mode': 2,
+    'n_threads': 0,
+    'keep_intermediate': False,
+    'n_pts': 100,
+}
+# Settings that only make sense for one dataset.
+DATASET_SETTINGS = {'log_root': _text, 'subjects': None}
+
+
+def read_settings() -> Dict[str, Any]:
+    try:
+        data = json.loads(SETTINGS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_settings(settings: Dict[str, Any]) -> None:
+    """Best effort: a read-only workdir must not break the launcher."""
+    try:
+        WORKDIR.mkdir(parents=True, exist_ok=True)
+        tmp = SETTINGS_FILE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(settings, indent=1, sort_keys=True))
+        os.replace(tmp, SETTINGS_FILE)
+    except OSError:
+        pass
+
+
+def restore_common_settings() -> None:
+    """Seed missing widget values from the saved settings, then from the defaults.
+
+    Widgets that are not drawn on the current page lose their value, so this
+    runs on every script run. Environment variables win on the first run.
+    """
+    if not st.session_state.get('environment_applied'):
+        st.session_state['environment_applied'] = True
+        for key, variable in (('db_root_input', 'TRACTOPL_DATASET_ROOT'), ('atlas_input', 'TRACTOPL_ATLAS')):
+            if os.environ.get(variable):
+                st.session_state[key] = os.environ[variable]
+    saved = read_settings().get('common', {})
+    for key, is_valid in COMMON_SETTINGS.items():
+        if key in st.session_state:
+            continue
+        if key in saved and is_valid(saved[key]):
+            st.session_state[key] = saved[key]
+        elif key in DEFAULTS:
+            st.session_state[key] = copy.copy(DEFAULTS[key])
+
+
+def restore_dataset_settings(db_root: str, subjects: List[str]) -> None:
+    """Seed the participant selection and log directory saved for this dataset."""
+    if st.session_state.get('settings_restored_for') != db_root:
+        st.session_state['settings_restored_for'] = db_root
+        saved = read_settings().get('datasets', {}).get(db_root, {})
+        chosen = saved.get('subjects')
+        chosen = [item for item in chosen if item in subjects] if isinstance(chosen, list) else []
+        st.session_state['subjects'] = chosen or subjects[:1]
+        log_root = saved.get('log_root')
+        st.session_state['log_root'] = (
+            log_root if _text(log_root) and log_root else os.path.join(db_root, 'tractopl_logs')
+        )
+
+
+def save_settings(db_root: str) -> None:
+    """Merge the widgets currently on screen into the saved settings."""
+    settings = read_settings()
+    common = settings.get('common') if isinstance(settings.get('common'), dict) else {}
+    datasets = settings.get('datasets') if isinstance(settings.get('datasets'), dict) else {}
+    updated_common = dict(common)
+    for key, is_valid in COMMON_SETTINGS.items():
+        if key in st.session_state and is_valid(st.session_state[key]):
+            updated_common[key] = st.session_state[key]
+    updated_dataset = dict(datasets.get(db_root, {}))
+    for key in DATASET_SETTINGS:
+        if key in st.session_state:
+            updated_dataset[key] = st.session_state[key]
+    updated = {'common': updated_common, 'datasets': {**datasets, db_root: updated_dataset}}
+    if updated != {'common': common, 'datasets': datasets}:
+        write_settings(updated)
+
+
+def forget_settings() -> None:
+    try:
+        SETTINGS_FILE.unlink()
+    except OSError:
+        pass
+    for key in [*COMMON_SETTINGS, *DATASET_SETTINGS, 'environment_applied', 'settings_restored_for']:
+        st.session_state.pop(key, None)
 
 
 # =============================================================================
 # Page
 # =============================================================================
 
-st.set_page_config(page_title='TractoPL Launcher', layout='wide')
-st.title('TractoPL Launcher')
-st.session_state.setdefault('logs', {})
+st.set_page_config(page_title='TractoPL', layout='wide')
+
+st.markdown(
+    """
+    <style>
+    header[data-testid="stHeader"] {
+        background-color: #4a4f57;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    }
+    [data-testid="stToolbar"]::before {
+        content: "TractoPL";
+        color: #ffffff;
+        font-size: 1.4rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding: 0 1.5rem 0 0.5rem;
+        margin-right: 0.5rem;
+        border-right: 1px solid rgba(255, 255, 255, 0.35);
+        white-space: nowrap;
+    }
+    [data-testid="stTopNavLink"],
+    [data-testid="stTopNavLink"] * {
+        color: #ffffff !important;
+    }
+    [data-testid="stTopNavLink"] {
+        border-radius: 0.375rem;
+        font-size: 1.15rem;
+        padding: 0.4rem 1rem;
+    }
+    [data-testid="stTopNavLink"] * {
+        font-size: 1.15rem !important;
+    }
+    [data-testid="stTopNavLink"]:hover {
+        background-color: rgba(255, 255, 255, 0.15);
+    }
+    [data-testid="stTopNavLink"][aria-current="page"] {
+        background-color: #6b7280;
+        font-weight: 600;
+    }
+    [data-testid="stToolbarActions"] *,
+    [data-testid="stMainMenu"] * {
+        color: #ffffff !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+restore_common_settings()
 
 with st.sidebar:
     st.header('Dataset')
-    db_root = st.text_input('BIDS root', value=os.environ.get('TRACTOPL_DATASET_ROOT', ''))
-    atlas = st.text_input('Atlas manifest (JSON)', value=os.environ.get('TRACTOPL_ATLAS', ''))
+    db_root = st.text_input('BIDS root', key='db_root_input')
+    atlas = st.text_input('Atlas manifest (JSON)', key='atlas_input')
     if st.button('Refresh dataset'):
         load_dataset.clear()
+        _cached_counts.clear()
 
 if not db_root or not os.path.isdir(db_root):
     st.info('Enter an existing BIDS root in the sidebar to start.')
@@ -387,13 +1020,22 @@ except Exception as error:  # noqa: BLE001 - surfaced to the user
 
 SUBJECTS: List[str] = description['subjects']
 DERIVATIVES: List[str] = description['derivatives']
+restore_dataset_settings(db_root, SUBJECTS)
 
 with st.sidebar:
     st.caption(f"{len(SUBJECTS)} participants, {description['file_count']} files")
-    subjects = st.multiselect('Participants', SUBJECTS, default=SUBJECTS[:1], key='subjects')
+    subjects = st.multiselect('Participants', SUBJECTS, key='subjects')
     st.caption('Existing derivatives: ' + (', '.join(DERIVATIVES) if DERIVATIVES else 'none'))
 
     st.header('Execution')
+    n_workers = st.number_input(
+        'Parallel participants', min_value=1, max_value=64, key='n_workers',
+        help='Participants processed at the same time. Steps of one participant stay sequential.',
+    )
+    log_root = st.text_input(
+        'Log directory', key='log_root',
+        help='Jobs keep running without the dashboard; their logs are stored here.',
+    )
     mode = st.radio('Run commands', ['Local', 'Apptainer'], horizontal=True, key='mode')
     execution: Dict[str, Any] = {'mode': mode.lower(), 'db_root': db_root, 'atlas': atlas}
     available_commands: Optional[List[str]] = None
@@ -401,10 +1043,12 @@ with st.sidebar:
 
     if mode == 'Apptainer':
         images = sorted(str(path) for path in CHECKOUT.glob('*.sif'))
-        execution['image'] = os.path.abspath(st.text_input('Image (.sif)', value=images[0] if images else ''))
-        execution['checkout'] = os.path.abspath(st.text_input('TractoPL checkout', value=str(CHECKOUT)))
+        st.session_state.setdefault('image_path', images[0] if images else '')
+        st.session_state.setdefault('checkout_path', str(CHECKOUT))
+        execution['image'] = os.path.abspath(st.text_input('Image (.sif)', key='image_path'))
+        execution['checkout'] = os.path.abspath(st.text_input('TractoPL checkout', key='checkout_path'))
         execution['pip_install'] = st.checkbox(
-            'Install the checkout in the image', value=True, key='pip_install',
+            'Install the checkout in the image', key='pip_install',
             help='Runs `pip install -e` before each command (in a writable tmpfs). '
                  'Bundle segmentation needs it for tractopl-generate-centroid and '
                  'tractopl-apply-trans-to-vtk.',
@@ -439,13 +1083,17 @@ with st.sidebar:
     if execution_problem:
         st.warning(execution_problem)
 
+    st.divider()
+    st.caption(f'Settings are remembered in {WORKDIR}')
+    if st.button('Forget saved settings'):
+        forget_settings()
+        st.rerun()
+
 if not SUBJECTS:
     st.warning('No participant was found in this dataset.')
     st.stop()
 
 params: Dict[str, Any] = {'db_root': db_root, 'atlas': atlas}
-output_areas: Dict[str, Any] = {}
-status_areas: Dict[str, Any] = {}
 
 
 def command_available(name: str) -> bool:
@@ -471,7 +1119,7 @@ def step_block(step: str, title: str, summary: str, options, needs_atlas: bool =
         header, toggle = st.columns([5, 1])
         header.markdown(f"#### {title}")
         header.caption(summary)
-        included = toggle.checkbox('Include', value=True, key=f'include_{step}')
+        included = toggle.checkbox('Include', key=f'include_{step}')
 
         options()
 
@@ -492,6 +1140,8 @@ def step_block(step: str, title: str, summary: str, options, needs_atlas: bool =
         problems = []
         if not subjects:
             problems.append('Select at least one participant in the sidebar.')
+        if step == 'preprocessing' and not params['preprocessing_steps']:
+            problems.append('Select at least one preprocessing step.')
         if needs_atlas and not os.path.isfile(atlas):
             problems.append('This step needs an existing atlas manifest.')
         if execution_problem:
@@ -514,12 +1164,6 @@ def step_block(step: str, title: str, summary: str, options, needs_atlas: bool =
             )
 
         run_now = st.button('Run this step', key=f'run_{step}', disabled=bool(problems))
-        status_areas[step] = st.empty()
-        output_areas[step] = st.empty()
-        if step in st.session_state['logs']:
-            kind, message, log = st.session_state['logs'][step]
-            getattr(status_areas[step], kind)(message)
-            output_areas[step].code(log, language='text')
 
     return step, included, run_now, bool(problems)
 
@@ -529,9 +1173,31 @@ def step_block(step: str, title: str, summary: str, options, needs_atlas: bool =
 # =============================================================================
 
 def preprocessing_options():
-    params['with_reversed_b0'] = st.checkbox(
-        'Use a reversed B0 for distortion correction', value=True, key='with_reversed_b0'
-    )
+    left, right = st.columns(2)
+    with left:
+        selected = st.multiselect(
+            'Steps', list(PREPROCESSING_STEPS),
+            format_func=PREPROCESSING_STEPS.get, key='preprocessing_steps',
+        )
+        # Keep the pipeline order whatever the selection order.
+        params['preprocessing_steps'] = [name for name in PREPROCESSING_STEPS if name in selected]
+    with right:
+        params['with_reversed_b0'] = st.checkbox(
+            'Use a reversed B0 for distortion correction', key='with_reversed_b0',
+            disabled='anima' not in params['preprocessing_steps'],
+        )
+
+    with right:
+        params['flip_bvec_checkbox'] = st.checkbox(
+            'Flip the b-vectors', key='flip_bvec_checkbox',
+            disabled='dti' not in params['preprocessing_steps'],
+        )
+        if params['flip_bvec_checkbox']:
+            params['flip_bvec'] = st.slider(
+                'B-vector flip axis', min_value=0, max_value=2, step=1,
+                key='flip_bvec',
+                disabled='dti' not in params['preprocessing_steps'],
+            )
 
 
 def msmt_options():
@@ -539,12 +1205,12 @@ def msmt_options():
     with left:
         params['msmt_pipeline'] = pipeline_selector('Output pipeline', 'msmt_csd', 'msmt_pipeline')
         params['n_streamlines'] = st.number_input(
-            'Streamlines', min_value=1000, max_value=10_000_000, value=1_000_000, step=100_000,
+            'Streamlines', min_value=1000, max_value=10_000_000, step=100_000,
             key='n_streamlines',
         )
     with right:
-        params['msmt_steps'] = st.multiselect('Steps', MSMT_STEPS, default=MSMT_STEPS, key='msmt_steps')
-        params['force'] = st.checkbox('Recompute existing outputs', value=False, key='force')
+        params['msmt_steps'] = st.multiselect('Steps', MSMT_STEPS, key='msmt_steps')
+        params['force'] = st.checkbox('Recompute existing outputs', key='force')
 
 
 def mcm_estimation_options():
@@ -553,38 +1219,38 @@ def mcm_estimation_options():
         st.markdown('**Model**')
         params['mcm_pipeline'] = pipeline_selector('Output pipeline', 'mcm_tensors', 'mcm_pipeline')
         params['tensor_model'] = st.selectbox(
-            'Anisotropic compartment type', list(COMPARTMENT_TYPES), index=2,
+            'Anisotropic compartment type', list(COMPARTMENT_TYPES),
             format_func=lambda value: f'{value} — {COMPARTMENT_TYPES[value]}', key='tensor_model',
         )
         params['model_selection'] = st.checkbox(
-            'Select the number of compartments with AIC', value=False, key='model_selection'
+            'Select the number of compartments with AIC', key='model_selection'
         )
         params['n_comparts'] = st.number_input(
-            'Anisotropic compartments', min_value=1, max_value=5, value=3,
+            'Anisotropic compartments', min_value=1, max_value=5,
             disabled=params['model_selection'], key='n_comparts',
             help='Without AIC, the fixel density map from MSMT-CSD sets the count per voxel.',
         )
     with middle:
         st.markdown('**Isotropic compartments**')
-        params['free_water'] = st.checkbox('Free water', value=True, key='free_water')
-        params['restricted_water'] = st.checkbox('Restricted water', value=True, key='restricted_water')
-        params['stanisz'] = st.checkbox('Stanisz', value=False, key='stanisz')
-        params['stationary_water'] = st.checkbox('Stationary water', value=False, key='stationary_water')
+        params['free_water'] = st.checkbox('Free water', key='free_water')
+        params['restricted_water'] = st.checkbox('Restricted water', key='restricted_water')
+        params['stanisz'] = st.checkbox('Stanisz', key='stanisz')
+        params['stationary_water'] = st.checkbox('Stationary water', key='stationary_water')
     with right:
         st.markdown('**Optimization**')
         params['ml_mode'] = st.selectbox(
-            'Maximum-likelihood mode', list(ML_MODES), index=2,
+            'Maximum-likelihood mode', list(ML_MODES),
             format_func=lambda value: f'{value} — {ML_MODES[value]}', key='ml_mode',
         )
         params['optimizer'] = st.selectbox('Optimizer', OPTIMIZERS, key='optimizer')
         params['n_threads'] = st.number_input(
-            'Threads (0 = all cores)', min_value=0, max_value=256, value=0, key='n_threads'
+            'Threads (0 = all cores)', min_value=0, max_value=256, key='n_threads'
         )
 
 
 def bundle_seg_options():
     params['keep_intermediate'] = st.checkbox(
-        'Keep intermediate files', value=False, key='keep_intermediate'
+        'Keep intermediate files', key='keep_intermediate'
     )
 
 
@@ -615,7 +1281,7 @@ def tractometry_options():
             'tractometry_mcm_pipeline',
         )
         params['n_pts'] = st.number_input(
-            'Points per bundle', min_value=10, max_value=500, value=100, step=10, key='n_pts'
+            'Points per bundle', min_value=10, max_value=500, step=10, key='n_pts'
         )
     with right:
         params['tractometry_bundle_pipeline'] = pipeline_selector(
@@ -624,93 +1290,105 @@ def tractometry_options():
         )
 
 
-blocks = [
-    step_block(
-        'preprocessing',
-        '1. DWI preprocessing',
-        'Corrects the DWI, fits DTI, and writes FA and a brain mask.',
-        preprocessing_options,
-    ),
-    step_block(
-        'msmt_csd',
-        '2. MSMT-CSD, fixels, and tractography',
-        'Writes responses, FODs, fixels, peaks, density, and a whole-brain tractogram.',
-        msmt_options,
-    ),
-    step_block(
-        'mcm_estimation',
-        '3. MCM estimation',
-        'Fits the multi-compartment model and writes the .mcmx archive.',
-        mcm_estimation_options,
-    ),
-    step_block(
-        'bundle_seg',
-        '4. Atlas registration and bundle segmentation',
-        'Registers the atlas and segments bundles from the whole-brain tractogram.',
-        bundle_seg_options,
-        needs_atlas=True,
-    ),
-    step_block(
-        'mcm_projection',
-        '5. MCM projection onto bundles',
-        'Writes one metric-bearing VTK tractogram per segmented bundle.',
-        mcm_projection_options,
-    ),
-    step_block(
-        'tractometry',
-        '6. Tractometry association',
-        'Writes association VTK files and per-bundle metric CSV files.',
-        tractometry_options,
-        needs_atlas=True,
-    ),
-]
+def pipeline_page() -> None:
+    blocks = [
+        step_block(
+            'preprocessing',
+            '1. DWI preprocessing',
+            'Corrects the DWI and writes a brain mask, fits DTI, and writes FA. Each step can run alone.',
+            preprocessing_options,
+        ),
+        step_block(
+            'msmt_csd',
+            '2. MSMT-CSD, fixels, and tractography',
+            'Writes responses, FODs, fixels, peaks, density, and a whole-brain tractogram.',
+            msmt_options,
+        ),
+        step_block(
+            'mcm_estimation',
+            '3. MCM estimation',
+            'Fits the multi-compartment model and writes the .mcmx archive.',
+            mcm_estimation_options,
+        ),
+        step_block(
+            'bundle_seg',
+            '4. Atlas registration and bundle segmentation',
+            'Registers the atlas and segments bundles from the whole-brain tractogram.',
+            bundle_seg_options,
+            needs_atlas=True,
+        ),
+        step_block(
+            'mcm_projection',
+            '5. MCM projection onto bundles',
+            'Writes one metric-bearing VTK tractogram per segmented bundle.',
+            mcm_projection_options,
+        ),
+        step_block(
+            'tractometry',
+            '6. Tractometry association',
+            'Writes association VTK files and per-bundle metric CSV files.',
+            tractometry_options,
+            needs_atlas=True,
+        ),
+    ]
 
-# =============================================================================
-# Execution
-# =============================================================================
+    # =============================================================================
+    # Execution
+    # =============================================================================
 
-included = [step for step, include, _, blocked in blocks if include and not blocked]
-blocked_included = [step for step, include, _, blocked in blocks if include and blocked]
+    included = [step for step, include, _, blocked in blocks if include and not blocked]
+    blocked_included = [step for step, include, _, blocked in blocks if include and blocked]
 
-st.divider()
-run_all = st.button(
-    f"Run the {len(included)} included steps",
-    type='primary',
-    disabled=not included or bool(blocked_included),
+    st.divider()
+    run_all = st.button(
+        f"Run the {len(included)} included steps",
+        type='primary',
+        disabled=not included or bool(blocked_included),
+    )
+    if blocked_included:
+        st.caption('Fix the warnings above to run every included step: ' + ', '.join(blocked_included))
+
+    steps_to_run: List[str] = [step for step, _, run_now, _ in blocks if run_now]
+    if run_all:
+        steps_to_run = included
+
+    if steps_to_run:
+        tasks = [
+            {'subject': subject, 'step': step,
+             'command': wrap_command(build_command(step, subject, params), execution)}
+            for subject in subjects for step in steps_to_run
+        ]
+        job_name = submit_job(log_root, int(n_workers), tasks)
+        jobs_changed()
+        st.session_state.setdefault('announced_jobs', set()).add(job_name)
+        notify(f'Job {job_name} started: {len(tasks)} task(s), {int(n_workers)} parallel participant(s).', '🚀')
+        flush_notifications()
+        st.success(f'Job {job_name} started: {len(tasks)} task(s), {int(n_workers)} parallel participant(s). '
+                   'Follow it on the Jobs page.')
+
+
+def jobs_page() -> None:
+    if hasattr(st, 'fragment'):
+        st.fragment(run_every=5)(render_jobs)(log_root)
+    else:
+        render_jobs(log_root)
+        if st.button('Refresh jobs'):
+            st.rerun()
+
+
+with st.sidebar:
+    st.header('Jobs')
+    if hasattr(st, 'fragment'):
+        st.fragment(run_every=5)(job_watcher)(log_root)
+    else:
+        job_watcher(log_root)
+
+navigation = st.navigation(
+    [
+        st.Page(pipeline_page, title='Pipeline', default=True),
+        st.Page(jobs_page, title='Jobs'),
+    ],
+    position='top',
 )
-if blocked_included:
-    st.caption('Fix the warnings above to run every included step: ' + ', '.join(blocked_included))
-
-steps_to_run: List[str] = [step for step, _, run_now, _ in blocks if run_now]
-if run_all:
-    steps_to_run = included
-
-if steps_to_run:
-    for step in steps_to_run:
-        st.session_state['logs'].pop(step, None)
-    failed = False
-    for step in steps_to_run:
-        logs: List[str] = []
-        for subject in subjects:
-            status_areas[step].info(f"Running sub-{subject}...")
-            command = wrap_command(build_command(step, subject, params), execution)
-            return_code, log = run_command(command, output_areas[step])
-            logs.append(f"### sub-{subject}\n{log}")
-
-            # Several commands exit 0 after catching an error: check the outputs too.
-            load_dataset.clear()
-            dataset = load_dataset(db_root)
-            _, outputs = step_io(step, params)
-            table = check_table(dataset, outputs, [subject])
-            missing = [label for label in table.columns if not table.loc[subject, label]]
-            if return_code != 0 or missing:
-                reason = f"exit code {return_code}" if return_code != 0 else 'missing ' + ', '.join(missing)
-                st.session_state['logs'][step] = ('error', f"Failed for sub-{subject} ({reason}). Stopped.",
-                                                  '\n'.join(logs))
-                failed = True
-                break
-        if failed:
-            break
-        st.session_state['logs'][step] = ('success', f"Completed for {len(subjects)} participant(s).",
-                                          '\n'.join(logs))
-    st.rerun()
+navigation.run()
+save_settings(db_root)

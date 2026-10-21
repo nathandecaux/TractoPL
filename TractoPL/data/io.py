@@ -214,6 +214,9 @@ def copy2nii(source, dest):
             shutil.copy2(source, dest)
     return dest
 
+# from warnings import deprecated
+
+# @deprecated('Use the shutil module instead')
 def symbolic_link(source, dest):
     """Crée un lien symbolique."""
     print(f"Creating symbolic link from {source} to {dest}")
@@ -221,6 +224,12 @@ def symbolic_link(source, dest):
     os.symlink(source, dest)
     return dest
 
+# def symbolic_link(source, dest):
+#     """Crée un lien symbolique en utilisant shutil."""
+#     print(f"Creating symbolic link from {source} to {dest}")
+#     pathlib.Path(os.path.dirname(dest)).mkdir(parents=True, exist_ok=True)
+#     shutil.symlink(source, dest)
+#     return dest
 
 def move2nii(source, dest):
     """Déplace un fichier, en convertissant en nifti si nécessaire."""
@@ -272,6 +281,14 @@ def remove_temp_dir(res_dict):
     first_key = list(res_dict.keys())[0]
     temp_dir = str(pathlib.Path(first_key).parent)
     if os.path.exists(temp_dir) and os.path.isdir(temp_dir):
+        # Steps os.chdir() into their temp dir: leave it first, otherwise every
+        # later subprocess inherits a deleted cwd (numba then fails in os.getcwd()).
+        try:
+            cwd = os.getcwd()
+        except FileNotFoundError:
+            cwd = None
+        if cwd is None or (os.path.realpath(cwd) + os.sep).startswith(os.path.realpath(temp_dir) + os.sep):
+            os.chdir(tempfile.gettempdir())
         try:
             shutil.rmtree(temp_dir)
         except Exception as e:

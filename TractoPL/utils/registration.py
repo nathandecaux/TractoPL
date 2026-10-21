@@ -96,8 +96,9 @@ def ants_registration(moving, fixed, outprefix='registered',transform_type='affi
     tmp_dir = os.path.dirname(list(res_dict.keys())[0])
     trans_list = []
     for trans in ['0GenericAffine','1Warp']:
-        if any([f for f in output_pattern if trans in f]):
-            trans_list.append(opj(tmp_dir,trans))
+        matches = [f for f in output_pattern if f.startswith(f"{outprefix}{trans}")]
+        if matches:
+            trans_list.append(opj(tmp_dir, matches[0]))
 
     trans_file = writeTransformSerie(moving, fixed,transform_list=trans_list)
     
@@ -111,7 +112,8 @@ def writeTransformSerie(moving_bidsfile, ref_bidsfile, transform_list, inverse_l
     """
 
     # Using animaTransformSerieXmlGenerator
-    output = transform_list[0].split('.')[0] + '.xml'
+    output = opj(os.path.dirname(transform_list[0]),
+                 os.path.basename(transform_list[0]).split('.')[0] + '.xml')
     print(output)
     # Get filename instead of full path
     moving_image = moving_bidsfile.filename if isinstance(moving_bidsfile, BIDSFile) else os.path.basename(moving_bidsfile)
@@ -121,7 +123,6 @@ def writeTransformSerie(moving_bidsfile, ref_bidsfile, transform_list, inverse_l
     if inverse_list is not None:
         inverse_list = [os.path.basename(inverse) for inverse in inverse_list]
 
-    os.chdir(os.path.dirname(output))
 
     command = ['animaTransformSerieXmlGenerator', '-D']
     for transform in transform_list:
@@ -133,7 +134,7 @@ def writeTransformSerie(moving_bidsfile, ref_bidsfile, transform_list, inverse_l
     command += ['-o', output]
 
     print(' '.join(command))
-    call(command)
+    call(command, cwd=os.path.dirname(output))
 
     # Using a json file (BIDS compliant)
     output = output.replace('.xml', '.json')

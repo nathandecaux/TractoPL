@@ -13,3 +13,5 @@ TractoPL/analysis/report_short.md.jinja2
 TractoPL/analysis/report_template_tracto.md.jinja2
 TractoPL/analysis/report_template.md.jinja2
 TractoPL/analysis/streamlit_workdir
+TractoPL/dashboard/launcher_workdir
+TractoPL/dashboard/nohup.out

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import sys
 import pathlib
-from subprocess import call
+from subprocess import check_call
 from TractoPL.set_config import set_config
 from TractoPL.utils.tools import upt_dict
 from TractoPL.data.loader import Subject
@@ -15,21 +15,32 @@ import click
 
 
 pipeline = 'preprocessing'
+PREPROCESSING_STEPS = ['anima', 'dti', 'fa']
 
 
 def _as_subject(subject, db_root=None):
     return subject if isinstance(subject, Subject) else Subject(subject, db_root)
 
-def flip_bvec_y(bvec_path, output_path):
+def flip_bvec_y(bvec_path, output_path,dim2flip=1):
     """
     Flip bvec in y direction by multiplying y component by -1
     """
     bvec_data = np.loadtxt(bvec_path)
     if bvec_data.shape[0] == 3:  # Standard format: 3 rows (x,y,z), N columns
-        bvec_data[1, :] *= -1  # Flip y component
+        bvec_data[dim2flip, :] *= -1  # Flip y component
     elif bvec_data.shape[1] == 3:  # Alternative format: N rows, 3 columns (x,y,z)
-        bvec_data[:, 1] *= -1  # Flip y component
+        bvec_data[:, dim2flip] *= -1  # Flip y component
     np.savetxt(output_path, bvec_data, fmt='%.6f')
+
+def _flatten_bval(bval_path, output_path):
+    """
+    Flatten a bval file to a single row.
+    """
+    bval_data = np.loadtxt(bval_path)
+    print(bval_data.shape)
+    
+    np.savetxt(output_path, np.reshape(bval_data, (1, -1)), fmt='%.6f')
+    print(np.reshape(bval_data, (1, -1)).shape)
 
 def animaPreprocessing(
     subject,
@@ -67,14 +78,19 @@ def animaPreprocessing(
 
     bval = subject.get(suffix='dwi',scope='raw',extension='bval')[0]
     temp_bval = os.path.join(temp_dir, os.path.basename(bval.path))
-    shutil.copy2(bval.path, temp_bval)
+
+    _flatten_bval(bval.path, temp_bval)
+    # shutil.copy2(bval.path, temp_bval)
 
 
     bvec = subject.get(suffix='dwi',scope='raw',extension='bvec')[0]
     temp_bvec = os.path.join(temp_dir, os.path.basename(bvec.path))
 
     if flip_bvecs:
-        flip_bvec_y(bvec.path, temp_bvec)
+        if isinstance(flip_bvecs,int):
+            flip_bvec_y(bvec.path, temp_bvec, dim2flip=flip_bvecs)
+        else:
+            flip_bvec_y(bvec.path, temp_bvec)
     else:
         shutil.copy2(bvec.path, temp_bvec)
     
@@ -110,7 +126,7 @@ def animaPreprocessing(
         preprocCommand = preprocCommand + ["-r", temp_b0_reversed]
 
     print(preprocCommand)
-    call(preprocCommand, cwd=temp_dir)
+    check_call(preprocCommand, cwd=temp_dir)
     
     print("Preprocess data finished")
     entities = {'suffix':'dwi','pipeline':pipeline}
@@ -148,7 +164,7 @@ def animaPreprocessing(
     # shutil.rmtree(temp_dir)
 
 
-def compute_dti(subject, db_root=None):
+def compute_dti(subject, db_root=None,flip_bvec=True,flatten_bval=True):
     """
     Computes DTI tensors from the preprocessed diffusion data.
     """
@@ -156,19 +172,36 @@ def compute_dti(subject, db_root=None):
     
     subject = _as_subject(subject, db_root)
     
-    preproc_dwi = subject.get_unique(suffix='dwi',pipeline=pipeline,desc='preproc',extension='nii.gz')
+    preproc_dwi = subject.get_unique(suffix='dwi',pipeline=pipeline,desc='preproc',extension='nii.gz',model=None)
     preproc_bvec= subject.get_unique(suffix='dwi',pipeline=pipeline,desc='preproc',extension='bvec')
+
     bval= subject.get_unique(suffix='dwi',scope='raw',extension='bval')
-    print(preproc_dwi.path)
     #create temporary directory
     temp_dir = tempfile.mkdtemp()
     #dtiEstimationCommand = [animaDTIEstimator, "-i", outputImage, "-o", dwiImagePrefix + "_Tensors.nrrd",
                         # "-O", dwiImagePrefix + "_Tensors_B0.nrrd", "-N", dwiImagePrefix + "_Tensors_NoiseVariance.nrrd",
                         # "-g", outputBVec, "-b", args.bval]
 
-    dti_command= f'animaDTIEstimator -i {preproc_dwi.path} -o {temp_dir}/dti_tensors.nii.gz -g {preproc_bvec.path} -b {bval.path}'
+    if flip_bvec:
+        
+        if isinstance(flip_bvec,int):
+            print(f'Flipping bvec file along the axis {flip_bvec}.')
+            flip_bvec_y(preproc_bvec.path,temp_dir+'/preproc_bvec.bvec', dim2flip=flip_bvec)  # Assuming you have a function to flip the bvec file
+        else:
+            print('Flipping bvec file along the y-axis.')
+            flip_bvec_y(preproc_bvec.path,temp_dir+'/preproc_bvec.bvec')
+        bvec_path=temp_dir+'/preproc_bvec.bvec'
+    else:
+        bvec_path=preproc_bvec.path
+
+    if flatten_bval:
+        _flatten_bval(bval.path, temp_dir+'/preproc_bval.bval')
+        bval_path=temp_dir+'/preproc_bval.bval'
+    else:
+        bval_path=bval.path
+    dti_command= f'animaDTIEstimator -i {preproc_dwi.path} -o {temp_dir}/dti_tensors.nii.gz -g {bvec_path} -b {bval_path}'
     
-    call(dti_command, shell=True)
+    check_call(dti_command, shell=True)
 
     res_dict = {
         f'{temp_dir}/dti_tensors.nii.gz': upt_dict(preproc_dwi.get_full_entities(), model='DTI')
@@ -191,7 +224,7 @@ def compute_fa(subject, db_root=None):
 
     fa_command = f'{tools["animaDTIScalarMaps"]} -i {tensors.path} -f {temp_dir}/fa.nii.gz'
     
-    call(fa_command, shell=True)
+    check_call(fa_command, shell=True)
 
     res_dict = {
         f'{temp_dir}/fa.nii.gz': upt_dict(tensors.get_full_entities(), metric='FA')
@@ -225,18 +258,26 @@ def process_all_FA(db_root=None,subjects=None):
 @click.option('--subject', required=True, help='Subject ID to preprocess.')
 @click.option('--db-root', required=True, help='Root directory of the BIDS database.')
 @click.option('--with-reversed-b0/--without-reversed-b0', default=True, show_default=True, help='Use reversed B0 images for distortion correction.')
-def cli(subject, db_root, with_reversed_b0):
+@click.option('--flip-bvec', default=False, show_default=False, help='Flip the y component of the b-vectors. Either false, or an integer axis (0, 1, 2).')
+@click.option('--step', 'steps', multiple=True, type=click.Choice(PREPROCESSING_STEPS),
+              help='Step to run; repeat to select multiple steps. Runs every step when omitted.')
+def cli(subject, db_root, with_reversed_b0, flip_bvec, steps):
     """
-    Run the full preprocessing pipeline: animaPreprocessing, compute_dti, and compute_fa.
+    Run the preprocessing pipeline: animaPreprocessing, compute_dti, and compute_fa.
     """
+    steps = steps or PREPROCESSING_STEPS
     try:
-        print(f"Starting preprocessing for subject {subject}.")
-        animaPreprocessing(subject, with_reversed_b0=with_reversed_b0, db_root=db_root)
-        compute_dti(subject, db_root=db_root)
-        compute_fa(subject, db_root=db_root)
+        print(f"Starting preprocessing for subject {subject} ({', '.join(steps)}).")
+        if 'anima' in steps:
+            animaPreprocessing(subject, with_reversed_b0=with_reversed_b0, db_root=db_root)
+        if 'dti' in steps:
+            compute_dti(subject, db_root=db_root, flip_bvec=flip_bvec)
+        if 'fa' in steps:
+            compute_fa(subject, db_root=db_root)
         print(f"Finished preprocessing for subject {subject}.")
     except Exception as e:
-        print(f"Error during preprocessing for subject {subject}: {e}")
+        print(f"Error during preprocessing for subject {subject}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 prepocessing = cli

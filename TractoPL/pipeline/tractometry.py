@@ -621,7 +621,8 @@ def process_one_subject(job):
         print(f"Erreur lors du traitement du sujet {sub}: {e}")
         import traceback
         traceback.print_exc()
-        return
+        return False
+    return True
 
 def association():
     args = parse_args()
@@ -651,7 +652,10 @@ def association():
         for subject_id in subject_ids
     ]
     with multiprocessing.Pool(n_proc) as pool:
-        pool.map(process_one_subject, jobs)
+        results = pool.map(process_one_subject, jobs)
+    if not all(results):
+        print("HCP Association pipeline failed for at least one subject")
+        sys.exit(1)
     print("HCP Association pipeline completed")
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ from dipy.tracking.streamline import transform_streamlines
 from dipy.io.stateful_tractogram import StatefulTractogram, Space
 import dipy
 from dipy.align import affine_registration
-from subprocess import call
+from subprocess import call, check_call
 
 def create_whole_brain_tract(tract_list, ref_image=None, **kwargs):
     """
@@ -514,7 +514,8 @@ def process_tractosearch(streamlines_file, models_dict, radius=None, **kwargs):
 
 
     print("Running command:", ' '.join(cmd))
-    call(cmd)
+    # Fail loudly: otherwise a TractoSearch crash only shows as "No matching tract found"
+    check_call(cmd, cwd=temp_dir)
 
     entities=streamlines_file.get_entities()
     entities.update(kwargs)

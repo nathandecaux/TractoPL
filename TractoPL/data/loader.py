@@ -4,8 +4,9 @@ import pathlib
 import nibabel as nib
 import SimpleITK as sitk
 import re
+import shutil
 from os.path import join as opj
-from TractoPL.data.io import copy2nii, move2nii, parse_filename
+from TractoPL.data.io import copy2nii, move2nii, parse_filename, symbolic_link
 import pandas as pd
 import pickle
 from TractoPL.data.vtk_loader import load_vtk, save_vtk
@@ -56,10 +57,12 @@ class BIDSFile:
     Représentation minimale d'un fichier BIDS (allégée).
     """
     def __init__(self, path, row=None):
-        self.path = path
-        #Change into full path if not already
-        if not os.path.isabs(self.path):
-            self.path = os.path.abspath(self.path)
+        path = os.fspath(path)
+        # Emplacement dans le dataset (peut être un lien symbolique)
+        self.bids_path = os.path.abspath(path)
+        # Chemin réel : les liens symboliques sont résolus
+        self.path = os.path.realpath(path)
+        # Le nom BIDS (et donc les entités) vient du lien, pas de la cible
         self.filename = os.path.basename(path)
         if row is not None:
             # Utiliser directement les informations du DataFrame en filtrant valeurs non pertinentes
@@ -72,7 +75,11 @@ class BIDSFile:
                              if k not in ['path'] and v is not None and not _is_nan(v)}
         else:
             # Fallback: parsing basique
-            self.entities = parse_filename(self.filename)
+            self.entities = parse_filename(self.filename.split('.')[0])
+            # 'sub-XX' / 'ses-YY' du nom -> entités subject / session
+            for short, full in (('sub', 'subject'), ('ses', 'session')):
+                if short in self.entities:
+                    self.entities[full] = self.entities.pop(short)
             if '.' in self.filename:
                 self.entities['extension'] = self.filename[self.filename.find('.'):]
             match_sub = re.search(r'/sub-([A-Za-z0-9]+)/', path)
@@ -81,6 +88,10 @@ class BIDSFile:
             match_ses = re.search(r'/ses-([A-Za-z0-9]+)/', path)
             if match_ses:
                 self.entities['session'] = match_ses.group(1)
+            # .../sub-XX[/ses-YY]/<datatype>/fichier
+            parent = os.path.dirname(self.bids_path)
+            if os.path.basename(os.path.dirname(parent))[:4] in ('sub-', 'ses-'):
+                self.entities['datatype'] = os.path.basename(parent)
         # Drapeaux dérivés
         self.entities['derivative'] = 'derivatives' in path
         if 'suffix' not in self.entities:
@@ -110,6 +121,11 @@ class BIDSFile:
     def session(self):
         """Accès direct à l'identifiant session si présent."""
         return self.entities.get('session')
+
+    @property
+    def is_symlink(self):
+        """True si le fichier du dataset est un lien symbolique vers un autre fichier."""
+        return self.bids_path != self.path
 
     def get_full_entities(self):
         return dict(self.entities)
@@ -148,21 +164,111 @@ class BIDSFile:
                 data[attr] = val
         return pd.DataFrame([data])
     
-    def update_entities(self, **new_entities):
-        """Mettre à jour les entités du fichier, et recalculer le chemin si nécessaire et renommer le fichier."""
-        # 1. Mettre à jour les entités
+    @classmethod
+    def from_file(cls, path, **entities):
+        """Créer un BIDSFile à partir d'un fichier quelconque (BIDS ou non).
+
+        Les entités sont d'abord déduites du nom de fichier, puis complétées /
+        écrasées par ``entities`` (une valeur None supprime l'entité). Rien n'est
+        écrit sur le disque : utiliser ``export`` pour l'ajouter à un Dataset.
+
+        Exemple :
+            f = BIDSFile.from_file('/tmp/t1_pve_0.nii.gz', subject='03011',
+                                   datatype='anat', suffix='propseg', label='CSF')
+            f.export(ds, pipeline='seg', mode='symlink')
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Fichier introuvable : {path}")
+        bids_file = cls(path)
+        # Le fichier source n'appartient à aucun dataset : 'derivative' sera
+        # déduit de 'pipeline' lors de l'export
+        bids_file.entities.pop('derivative', None)
+        return bids_file.set_entities(**entities)
+
+    def set_entities(self, **new_entities):
+        """Mettre à jour les entités en mémoire uniquement (aucun renommage).
+        Une valeur None supprime l'entité. Retourne self pour chaîner les appels."""
         for key, value in new_entities.items():
             if value is None:
-                # Supprimer l'entité si la valeur est None
                 self.entities.pop(key, None)
             else:
                 self.entities[key] = value
-        
+        return self
+
+    def export(self, dataset, mode='str', overwrite=False, dry_run=False, **entities):
+        """Copier / lier / déplacer le fichier dans un Dataset, à l'emplacement
+        construit à partir de ses entités (cf. ``Subject.build_path``).
+
+        Args:
+            dataset: Dataset, Subject ou racine du dataset (str / Path).
+            mode: 'copy' (avec conversion nrrd -> nii.gz si besoin), 'symlink'
+                (lien vers le chemin réel) ou 'move'.
+            overwrite: remplacer la destination si elle existe déjà.
+            dry_run: afficher l'opération sans l'exécuter.
+            **entities: entités à modifier pour la destination uniquement (None
+                supprime), ex. pipeline='seg' pour écrire dans derivatives/seg.
+                Les entités de self ne sont pas modifiées.
+
+        Retourne le BIDSFile de destination. Le DataFrame d'un Dataset déjà
+        construit n'est pas rafraîchi (appeler ``dataset.refresh()``).
+        """
+        if mode not in ('copy', 'symlink', 'move','str'):
+            raise ValueError(f"mode inconnu : {mode} (attendu : 'copy', 'symlink' ou 'move')")
+        target = {k: v for k, v in self.entities.items() if k not in ('derivative', 'path')}
+        for key, value in entities.items():
+            if value is None:
+                target.pop(key, None)
+            else:
+                target[key] = value
+        subject_id = target.pop('subject', None)
+        if not subject_id:
+            raise ValueError("L'entité 'subject' est requise pour exporter le fichier")
+        suffix = target.pop('suffix', None)
+        if not suffix:
+            raise ValueError("L'entité 'suffix' est requise pour exporter le fichier")
+
+        db_root = dataset.db_root if isinstance(dataset, (Dataset, Subject)) else dataset
+        subject = Subject(subject_id, db_root=db_root)
+        target.setdefault('extension', None)
+        dest = subject.build_path(suffix, original_name=self.filename, **target)
+
+        if os.path.abspath(dest) == self.bids_path:
+            return self
+
+        if mode == 'str':
+            return dest
+        if dry_run:
+            print(f"[dry_run] {mode} {self.path} -> {dest}")
+            return BIDSFile(dest)
+        if os.path.lexists(dest):
+            if not overwrite:
+                raise FileExistsError(f"La destination existe déjà : {dest}")
+            if os.path.isdir(dest) and not os.path.islink(dest):
+                shutil.rmtree(dest)
+            else:
+                os.remove(dest)
+
+        if mode == 'copy':
+            copy2nii(self.path, dest)
+        elif mode == 'symlink':
+            symbolic_link(self.path, dest)
+        else:
+            move2nii(self.path, dest)
+            if self.is_symlink:
+                os.remove(self.bids_path)
+        return BIDSFile(dest)
+
+    def update_entities(self, **new_entities):
+        """Mettre à jour les entités du fichier, et recalculer le chemin si nécessaire et renommer le fichier.
+        Si le fichier est un lien symbolique, c'est le lien qui est renommé (la cible ne bouge pas)."""
+        # 1. Mettre à jour les entités
+        self.set_entities(**new_entities)
+
         # 2. Reconstruire le nom de fichier basé sur les entités
         # Extraire le sujet depuis le chemin ou les entités
         subject = self.entities.get('subject')
         if not subject:
-            match_sub = re.search(r'/sub-([A-Za-z0-9]+)/', self.path)
+            match_sub = re.search(r'/sub-([A-Za-z0-9]+)/', self.bids_path)
             if match_sub:
                 subject = match_sub.group(1)
         
@@ -179,10 +285,10 @@ class BIDSFile:
         
         # Déterminer le répertoire de base
         if derivative and pipeline:
-            base_dir = opj(os.path.dirname(self.path).split('/derivatives/')[0], 
+            base_dir = opj(os.path.dirname(self.bids_path).split('/derivatives/')[0],
                           'derivatives', pipeline, f'sub-{subject}')
         else:
-            base_dir = opj(os.path.dirname(self.path).split(f'/sub-{subject}')[0], 
+            base_dir = opj(os.path.dirname(self.bids_path).split(f'/sub-{subject}')[0],
                           f'sub-{subject}')
         
         # Ajouter session si présente
@@ -223,17 +329,19 @@ class BIDSFile:
         new_filename = '_'.join(name_parts) + extension
         new_path = opj(base_dir, new_filename)
         
-        # 3. Renommer le fichier si le chemin a changé
-        if new_path != self.path:
+        # 3. Renommer le fichier (ou le lien) si le chemin a changé
+        if new_path != self.bids_path:
             # Créer le répertoire si nécessaire
             pathlib.Path(os.path.dirname(new_path)).mkdir(parents=True, exist_ok=True)
-            
+
             # Renommer le fichier
-            if os.path.exists(self.path):
-                os.rename(self.path, new_path)
-            
+            if os.path.lexists(self.bids_path):
+                os.rename(self.bids_path, new_path)
+
             # Mettre à jour le chemin interne
-            self.path = new_path
+            if not self.is_symlink:
+                self.path = new_path
+            self.bids_path = new_path
             self.filename = os.path.basename(new_path)
         
         return self.path

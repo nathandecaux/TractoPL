@@ -13,11 +13,14 @@ import multiprocessing
 import tempfile
 from glob import glob
 import traceback
+import sys
 from subprocess import call
 import json
 from tqdm import tqdm
 from time import sleep
 import argparse
+
+keep_intermediate = False
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Bundle segmentation pipeline")
@@ -83,7 +86,10 @@ def register_template_to_anat(subject, pipeline, atlas, **kwargs):
     anat = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
 
 
-    if len(subject.get(pipeline=pipeline, suffix='xfm', desc='0GenericAffine', extension='mat')) > 0:
+    transforms = [dict(desc='0GenericAffine', extension='mat'),
+                  dict(desc='1Warp', extension='nii.gz'),
+                  dict(desc='1InverseWarp', extension='nii.gz')]
+    if all(len(subject.get(pipeline='bundle_seg', suffix='xfm', **entities)) > 0 for entities in transforms):
         print('Registration already done, skipping')
         return True
 
@@ -92,14 +98,13 @@ def register_template_to_anat(subject, pipeline, atlas, **kwargs):
     print('Registering template to subject anatomical image', anat.path)
     res_dict=ants_registration(str(atlas.reference), anat.path, outprefix='to_anat', moving_space=atlas_name, fixed_space='subject', transform_type='synquick', **kwargs)
 
-    if keep_intermediate:
-    #Get the entry in res_dict that contains desc=='1Warp'
-        entry = [k for k,v in res_dict.items() if v.get('desc','') == 'Warped']
-        if len(entry) == 0:
-            raise ValueError('No 1Warp entry found in registration result')
-        entry = entry[0]
-        new_entities=res_dict[entry]
-        res_dict[entry]=upt_dict(new_entities,atlas=atlas_name,suffix='anat')
+    # The Warped image has no suffix: tag it as anat if kept, otherwise drop it
+    warped = [k for k,v in res_dict.items() if v.get('desc','') == 'Warped']
+    for entry in warped:
+        if keep_intermediate:
+            res_dict[entry]=upt_dict(res_dict[entry],atlas=atlas_name,suffix='anat')
+        else:
+            res_dict.pop(entry)
     # Save the transformation matrix
     copy_from_dict(subject,res_dict,pipeline='bundle_seg')
     return True
@@ -855,7 +860,8 @@ def main():
             pipeline_list.append('generate_cluster_and_apply_transformation')
             
  
-    process_single_subject((args.subject, dataset_path, pipeline_name, pipeline_list, atlas))
+    if not process_single_subject((args.subject, dataset_path, pipeline_name, pipeline_list, atlas)):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

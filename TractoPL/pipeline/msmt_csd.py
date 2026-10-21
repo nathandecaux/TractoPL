@@ -120,10 +120,17 @@ def process_fixels(subject, pipeline, **kwargs):
     if already_done(subject, pipeline, {'extension':'fixel', 'label':'WM'}) and not force:
         print("Fixels already exist, skipping computation.")
         return
-    wm_fod = subject.get_unique(label='WM', model='fod', pipeline=pipeline, desc='preproc', suffix='fod')
+    wm_fod = subject.get(label='WM', pipeline=pipeline, suffix='fod')
+    if len(wm_fod) == 2:
+        for wm in wm_fod:
+            if 'normalized' in wm.get_entities().get('desc', ''):
+                wm_fod = wm
+    else:
+        wm_fod = wm_fod[0]
+    
     mask = subject.get_unique(suffix='mask', label='brain', space='B0')
     res_dict = fod_to_fixels(fod=wm_fod, mask=mask, max_peaks=CLIArg('maxnum', 3), **kwargs)
-    copy_from_dict(subject, res_dict, pipeline=pipeline,remove_after_copy=False)
+    copy_from_dict(subject, res_dict, pipeline=pipeline,remove_after_copy=False,desc=None)
 
 def process_peaks(subject, pipeline, **kwargs):
     """Perform peak extraction"""
@@ -133,7 +140,7 @@ def process_peaks(subject, pipeline, **kwargs):
 
 def process_peak_density(subject, pipeline, **kwargs):
     """Calculate peak density from peaks"""
-    peaks = subject.get_unique(suffix='peaks', label='WM', desc='preproc', pipeline=pipeline)
+    peaks = subject.get_unique(suffix='peaks', label='WM', pipeline=pipeline)
     peak_density = get_peak_density(peaks, **kwargs)
     entities = peaks.get_entities()
     entities = upt_dict(entities, suffix='density', extension='nii.gz', pipeline=pipeline)

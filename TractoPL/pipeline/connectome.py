@@ -13,6 +13,7 @@ import multiprocessing
 import tempfile
 from glob import glob
 import traceback
+import sys
 from subprocess import call
 import json
 from tqdm import tqdm
@@ -338,7 +339,9 @@ def cli(db_root, atlas, subject, pipeline, steps, n_proc):
     subject_ids = [subject] if subject else dataset.subject_ids
     jobs = [(subject_id, db_root, pipeline, atlas_config.name, steps) for subject_id in subject_ids]
     with multiprocessing.Pool(processes=n_proc) as pool:
-        pool.map(process_single_subject, jobs)
+        results = pool.map(process_single_subject, jobs)
+    if not all(results):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
