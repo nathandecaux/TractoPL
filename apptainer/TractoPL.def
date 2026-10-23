@@ -16,6 +16,12 @@ From: ubuntu:24.04
 %post
     set -eu
 
+    # Scratch inside the rootfs (lives in $APPTAINER_TMPDIR on the host), not
+    # the host /tmp bound into %post, which can be a small root partition.
+    tmp=/var/build-tmp
+    mkdir -p $tmp
+    export TMPDIR=$tmp
+
     # --- system packages: bare minimum, everything else comes from conda ---
     # g++ is needed at build time: lpqtree has no cp311 wheel on PyPI, so pip
     # compiles its pybind11 extension against /opt/conda's Python.
@@ -26,15 +32,15 @@ From: ubuntu:24.04
     rm -rf /var/lib/apt/lists/*
 
     # --- Anima (official binaries, not available on conda-forge) ---
-    wget -q -O /tmp/anima.zip \
+    wget -q -O $tmp/anima.zip \
         https://github.com/Inria-Empenn/Anima-Public/releases/download/v4.2/Anima-Ubuntu-4.2.zip
-    unzip -q /tmp/anima.zip -d /tmp/anima-extract
-    rm /tmp/anima.zip
-    anima_dir=$(find /tmp/anima-extract -mindepth 1 -maxdepth 1 -type d -print -quit)
+    unzip -q $tmp/anima.zip -d $tmp/anima-extract
+    rm $tmp/anima.zip
+    anima_dir=$(find $tmp/anima-extract -mindepth 1 -maxdepth 1 -type d -print -quit)
     test -n "$anima_dir"
     mv "$anima_dir" /opt/anima
     chmod +x /opt/anima/*
-    rm -rf /tmp/anima-extract
+    rm -rf $tmp/anima-extract
     test -x /opt/anima/animaTracksMCMPropertiesExtraction
 
     # --- Anima-Scripts + data (with LFS) ---
@@ -47,22 +53,22 @@ From: ubuntu:24.04
 
     # --- ANTs (official prebuilt binaries: keeps the huge bioconda index,
     # and its cross-product with conda-forge, out of the solve entirely) ---
-    wget -q -O /tmp/ants.zip \
+    wget -q -O $tmp/ants.zip \
         https://github.com/ANTsX/ANTs/releases/download/v2.6.5/ants-2.6.5-almalinux9-X64-gcc.zip
     mkdir -p /opt/ants
-    unzip -q /tmp/ants.zip -d /opt/ants
-    rm /tmp/ants.zip
+    unzip -q $tmp/ants.zip -d /opt/ants
+    rm $tmp/ants.zip
     ants_binary=$(find /opt/ants -type f -name antsRegistration -print -quit)
     test -n "$ants_binary"
     ln -s "$(dirname "$ants_binary")" /opt/ants/bin
 
     # --- micromamba: python + scientific stack in /opt/conda (staged installs),
     # MRtrix3 in its own env /opt/mrtrix3 ---
-    wget -q -O /tmp/micromamba.tar.bz2 \
+    wget -q -O $tmp/micromamba.tar.bz2 \
         https://micro.mamba.pm/api/micromamba/linux-64/latest
-    tar -xjf /tmp/micromamba.tar.bz2 -C /tmp bin/micromamba
-    install -m 0755 /tmp/bin/micromamba /usr/local/bin/micromamba
-    rm -rf /tmp/bin /tmp/info /tmp/micromamba.tar.bz2
+    tar -xjf $tmp/micromamba.tar.bz2 -C $tmp bin/micromamba
+    install -m 0755 $tmp/bin/micromamba /usr/local/bin/micromamba
+    rm -rf $tmp/bin $tmp/info $tmp/micromamba.tar.bz2
 
     # numpy<2: current antspyx wheels are not built against numpy 2
     #
@@ -97,7 +103,14 @@ From: ubuntu:24.04
 
     # --- pip-only packages, installed inside the conda env ---
     git clone --depth 1 https://github.com/StongeEtienne/tractosearch.git /opt/tractosearch
-    /opt/conda/bin/python -m pip install --no-cache-dir antspyx lpqtree /opt/tractosearch streamlit
+    # lpqtree's setup.py hardcodes -march=native: the .so then dies with SIGILL
+    # on older hosts (e.g. Ivy Bridge, no AVX2). Strip it for a portable build.
+    /opt/conda/bin/python -m pip download --no-cache-dir --no-deps --no-binary lpqtree -d $tmp/lpq lpqtree
+    tar xzf $tmp/lpq/lpqtree-*.tar.gz -C $tmp/lpq
+    sed -i 's/, "-march=native"//' $tmp/lpq/lpqtree-*/setup.py
+    ! grep -q march=native $tmp/lpq/lpqtree-*/setup.py
+    /opt/conda/bin/python -m pip install --no-cache-dir antspyx $tmp/lpq/lpqtree-*/ /opt/tractosearch streamlit
+    rm -rf $tmp/lpq
     chmod +x /opt/tractosearch/scripts/*.py
     rm /opt/tractosearch/scripts/tractosearch_nearest_in_radius.py
     rm -rf /opt/tractosearch/.git
@@ -116,6 +129,8 @@ From: ubuntu:24.04
             > "/usr/local/bin/tractopl-$name"
         chmod +x "/usr/local/bin/tractopl-$name"
     done
+
+    rm -rf $tmp
 
 %environment
     export PATH=/opt/anima:/opt/ants/bin:/opt/conda/bin:/opt/mrtrix3/bin:/opt/tractosearch/scripts:/usr/local/bin:$PATH

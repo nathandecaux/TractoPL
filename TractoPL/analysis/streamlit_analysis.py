@@ -34,10 +34,16 @@ DEFAULT_CONFIG = {
     "group_variables": {},           # e.g. {"group": {"confounds": ["age"]}}
     "corr_variables": {},            # e.g. {"score": {"confounds": ["age"]}}
     "test_by_group": None,
+    "STAT_MODEL": "residualize",     # residualize | glm
+    "COMBAT_BATCH": None,            # site column harmonized with ComBat (None = off)
+    "COMBAT_EB": True,
+    "COMBAT_MEAN_ONLY": False,
+    "COMBAT_PER_PERMUTATION": False,
     "FWE_METHOD": "clusterFWE",      # clusterFWE | alphaFWE | mixed
     "AFQ_ALPHA": 0.05,
     "AFQ_NPERM": 1000,
     "CORRECT_MULTI_TRACT": False,
+    "RANDOM_SEED": None,             # None = random permutations
     "MISSING_SUBJECTS_TOLERANCE": 0,
     "INTERPOLATE_MISSING_POINTS": 2,
     "KEEP_LARGEST_CONTIGUOUS": True,
@@ -50,9 +56,14 @@ DEFAULT_CONFIG = {
     "EXCLUDE": {},                   # e.g. {"group": ["excluded"]}
     "MULTIPROCESSING": True,
     "n_jobs": None,                  # None = auto
+    "SAVE_FIGURES": False,
     "output_dir": None,
 }
 
+STAT_MODELS = {
+    "residualize": "Residualization + t-test / ANOVA / correlation",
+    "glm": "GLM (pointwise general linear model)",
+}
 FWE_METHODS = ["clusterFWE", "alphaFWE", "mixed"]
 CORRELATION_TESTS = ["pearson", "spearman"]
 METRIC_CHOICES = ["FA", "IFW",'IRF']
@@ -133,11 +144,18 @@ def push_config_to_widgets(cfg):
         ss[f"conf::{var}"] = list(spec.get("confounds", []))
 
     ss["test_by_group"] = cfg.get("test_by_group") or NO_GROUP
+    ss["stat_model"] = cfg.get("STAT_MODEL") or "residualize"
+    ss["combat_batch"] = cfg.get("COMBAT_BATCH") or NO_GROUP
+    ss["combat_eb"] = bool(cfg.get("COMBAT_EB", True))
+    ss["combat_mean_only"] = bool(cfg.get("COMBAT_MEAN_ONLY", False))
+    ss["combat_per_perm"] = bool(cfg.get("COMBAT_PER_PERMUTATION", False))
     ss["fwe_method"] = cfg.get("FWE_METHOD", "clusterFWE")
     ss["afq_alpha"] = float(cfg.get("AFQ_ALPHA", 0.05))
     ss["afq_nperm"] = int(cfg.get("AFQ_NPERM", 1000))
     ss["corr_test"] = cfg.get("CORRELATION_TEST", "pearson")
     ss["correct_multi_tract"] = bool(cfg.get("CORRECT_MULTI_TRACT", False))
+    ss["fix_seed"] = cfg.get("RANDOM_SEED") is not None
+    ss["random_seed"] = int(cfg.get("RANDOM_SEED") or 0)
 
     ss["missing_tol"] = int(cfg.get("MISSING_SUBJECTS_TOLERANCE", 0))
     ss["interp_gap"] = int(cfg.get("INTERPOLATE_MISSING_POINTS", 2))
@@ -150,6 +168,7 @@ def push_config_to_widgets(cfg):
 
     ss["multiproc"] = bool(cfg.get("MULTIPROCESSING", True))
     ss["n_jobs"] = int(cfg.get("n_jobs") or 0)
+    ss["save_figures"] = bool(cfg.get("SAVE_FIGURES", False))
 
     for rid in ss.get("exclude_ids", []):
         ss.pop(f"excl_col::{rid}", None)
@@ -200,6 +219,15 @@ def read_table(f) -> pd.DataFrame:
     if f.name.lower().endswith((".xlsx", ".xls")):
         return pd.read_excel(f)
     return pd.read_csv(f)
+
+
+def arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of df displayable by st.dataframe: mixed-type object columns cast to str."""
+    out = df.copy()
+    for col in out.columns[out.dtypes == object]:
+        if out[col].dropna().map(type).nunique() > 1:
+            out[col] = out[col].astype("string")
+    return out
 
 
 def default_join_key(columns, current):
@@ -561,11 +589,18 @@ def build_config() -> dict:
     tb = ss.get("test_by_group", NO_GROUP)
     cfg["test_by_group"] = None if tb in (None, "", NO_GROUP) else tb
 
+    cfg["STAT_MODEL"] = ss.get("stat_model", "residualize")
+    batch = str(ss.get("combat_batch") or "").strip()
+    cfg["COMBAT_BATCH"] = None if batch in ("", NO_GROUP) else batch
+    cfg["COMBAT_EB"] = bool(ss.get("combat_eb", True))
+    cfg["COMBAT_MEAN_ONLY"] = bool(ss.get("combat_mean_only", False))
+    cfg["COMBAT_PER_PERMUTATION"] = bool(ss.get("combat_per_perm", False))
     cfg["FWE_METHOD"] = ss.get("fwe_method", "clusterFWE")
     cfg["AFQ_ALPHA"] = float(ss.get("afq_alpha", 0.05))
     cfg["AFQ_NPERM"] = int(ss.get("afq_nperm", 1000))
     cfg["CORRELATION_TEST"] = ss.get("corr_test", "pearson")
     cfg["CORRECT_MULTI_TRACT"] = bool(ss.get("correct_multi_tract", False))
+    cfg["RANDOM_SEED"] = int(ss.get("random_seed", 0)) if ss.get("fix_seed") else None
 
     cfg["MISSING_SUBJECTS_TOLERANCE"] = int(ss.get("missing_tol", 0))
     cfg["INTERPOLATE_MISSING_POINTS"] = int(ss.get("interp_gap", 2))
@@ -578,6 +613,7 @@ def build_config() -> dict:
 
     cfg["MULTIPROCESSING"] = bool(ss.get("multiproc", True))
     cfg["n_jobs"] = int(ss["n_jobs"]) if ss.get("n_jobs") else None
+    cfg["SAVE_FIGURES"] = bool(ss.get("save_figures", False))
 
     cfg["EXCLUDE"] = {}
     for rid in ss.get("exclude_ids", []):
@@ -801,18 +837,31 @@ with tab_data:
         else:
             st.success(f"Table loaded: {len(df_sub_raw)} rows — will be passed via `--subjects-table`.")
         st.caption(f"Table passed to the analysis: `{table_file}`")
-        st.dataframe(df_sub, use_container_width=True)
+        st.dataframe(arrow_safe(df_sub), use_container_width=True)
 
 
 # --------------------------- Variables & tests -----------------------------
 with tab_vars:
     df_sub = get_active_subjects_df()
+    st.markdown("#### Statistical model")
+    st.radio("Model", list(STAT_MODELS), format_func=STAT_MODELS.get, key="stat_model",
+             horizontal=True, label_visibility="collapsed")
+    glm = st.session_state.get("stat_model") == "glm"
+    if glm:
+        st.caption("At each point: `metric ~ 1 + variable + confounds` (categorical variables and "
+                   "confounds dummy-coded). The variable is tested with a partial F-test (t-test of "
+                   "the slope for a single term); for correlations, r is the partial correlation. "
+                   "FWE permutations follow the Freedman-Lane scheme.")
+    else:
+        st.caption("At each point the confounds are regressed out by OLS, then a Welch t-test "
+                   "(2 groups), an ANOVA (> 2 groups) or a correlation is computed on the residuals.")
+
     st.markdown("#### Variables to analyse")
     if df_sub is not None:
         cols = list(df_sub.columns)
         st.caption("Selected from the subjects table columns.")
         c1, c2 = st.columns(2)
-        gvars = c1.multiselect("Group variables (categorical → t-test/ANOVA)",
+        gvars = c1.multiselect("Group variables (categorical)",
                                cols, key="group_vars_sel")
         cvars = c2.multiselect("Correlation variables (continuous)",
                                cols, key="corr_vars_sel")
@@ -825,7 +874,8 @@ with tab_vars:
 
     all_vars = gvars + cvars
     if all_vars:
-        st.markdown("#### Confounds (variables regressed out by OLS before testing)")
+        st.markdown("#### Confounds (covariates in the GLM)" if glm else
+                    "#### Confounds (variables regressed out by OLS before testing)")
         conf_opts = list(df_sub.columns) if df_sub is not None else None
         for v in all_vars:
             with st.expander(f"Confounds — {v}"):
@@ -844,6 +894,31 @@ with tab_vars:
                     conf_as_str(v)
                     st.text_input("Confounds (comma-separated)", key=f"conf::{v}")
 
+    st.markdown("#### Site harmonization (ComBat)")
+    if df_sub is not None:
+        batch_opts = [NO_GROUP] + list(df_sub.columns)
+        if st.session_state.get("combat_batch") not in batch_opts:
+            st.session_state["combat_batch"] = NO_GROUP
+        st.selectbox("Site column (none = no harmonization)", batch_opts, key="combat_batch")
+    else:
+        if st.session_state.get("combat_batch") == NO_GROUP:
+            st.session_state["combat_batch"] = ""
+        st.text_input("Site column (empty = no harmonization)", key="combat_batch")
+    combat_on = str(st.session_state.get("combat_batch") or "").strip() not in ("", NO_GROUP)
+    if combat_on:
+        st.caption("All the bundles of a metric are harmonized together, separately for each "
+                   "variable, which is protected with its confounds. Listing the site as a "
+                   "confound as well is redundant. A report of the site effects is written in "
+                   "`<output>/combat/`.")
+    c1, c2, c3 = st.columns(3)
+    c1.checkbox("Empirical Bayes", key="combat_eb", disabled=not combat_on)
+    c2.checkbox("Mean only (no scale correction)", key="combat_mean_only", disabled=not combat_on)
+    c3.checkbox("Re-run ComBat in each permutation (recommended, slower)", key="combat_per_perm",
+                disabled=not combat_on,
+                help="Harmonizing once before the permutations inflated the false positive rate "
+                     "in simulations (≈ 7-10% instead of 5%) when the variable is associated with "
+                     "the site.")
+
     st.divider()
     st.markdown("#### Statistical parameters")
     tb_opts = [NO_GROUP] + list(gvars)
@@ -856,8 +931,14 @@ with tab_vars:
     c2.number_input("Alpha", 0.0, 1.0, step=0.01, key="afq_alpha")
     c3.number_input("Permutations (AFQ_NPERM)", 0, 10000, step=100, key="afq_nperm")
     c1, c2 = st.columns(2)
-    c1.selectbox("Correlation test", CORRELATION_TESTS, key="corr_test")
+    c1.selectbox("Correlation test", CORRELATION_TESTS, key="corr_test", disabled=glm,
+                 help="Not used by the GLM model (linear association, partial correlation)."
+                 if glm else None)
     c2.checkbox("Multi-tract correction (slower)", key="correct_multi_tract")
+    c1, c2 = st.columns(2)
+    c1.checkbox("Fixed random seed (reproducible permutations)", key="fix_seed")
+    c2.number_input("Random seed", 0, 2**31 - 1, key="random_seed",
+                    disabled=not st.session_state.get("fix_seed"))
 
 # ---------------------------- Advanced options -----------------------------
 with tab_adv:
@@ -885,11 +966,15 @@ with tab_adv:
     )
     st.multiselect("Statistics (columns looked up: <METRIC>_<STAT> or <METRIC>)",
                    stat_options, key="stat_types")
-    st.checkbox("Only correct the metric for confounds", key="correct_metric_confond_only")
+    st.checkbox("Only correct the metric for confounds", key="correct_metric_confond_only",
+                disabled=st.session_state.get("stat_model") == "glm",
+                help="Residualization model only: the confounds are not regressed out of the "
+                     "correlation variable.")
 
     st.markdown("#### Execution")
     st.checkbox("Multiprocessing", key="multiproc")
     st.number_input("n_jobs (0 = auto → cpu_count//3)", 0, 256, key="n_jobs")
+    st.checkbox("Save figures (PNG next to each result CSV, slower)", key="save_figures")
 
     st.markdown("#### Exclusions (EXCLUDE)")
     df_excl = get_active_subjects_df()

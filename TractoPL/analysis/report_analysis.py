@@ -515,11 +515,39 @@ pn.config.sizing_mode = 'stretch_width'
 template.servable()
 
 
-if __name__ == '__main__':
-    if '--autoreload' in sys.argv:
-        template.show(autoreload=True)
+
+def main():
+        #Check port 6767, if already in use, choose, increase
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    port = 6767
+    while True:
+        try:
+            sock.bind(("0.0.0.0", port))
+            sock.close()
+            break
+        except OSError:
+            port += 1
+    print(f"Using port {port}")
+
+    #Open is false if this is starting from an ssh session
+    import os
+    if os.environ.get("SSH_CONNECTION"):
+        open_browser = False
     else:
-        template.show(websocket_origin=["*"])  # accessible depuis l'extérieur
+        open_browser = True
+    template.show(autoreload=True, websocket_origin=["*"], port=port, open=open_browser)
+
+if __name__ == '__main__':
+    main()
+
+
+    # #If hostname is calcarine, don't open
+    # import socket
+    # hostname = socket.gethostname()
+    # if hostname != "calcarine":
+    #     template.show(autoreload=True,websocket_origin=["*"], port=port)
+
 
 
 

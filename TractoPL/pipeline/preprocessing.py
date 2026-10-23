@@ -8,6 +8,7 @@ from TractoPL.set_config import set_config
 from TractoPL.utils.tools import upt_dict
 from TractoPL.data.loader import Subject
 from TractoPL.data.io import copy_from_dict
+from TractoPL.utils.mat import save_flatten_bval
 import tempfile
 import glob
 import shutil
@@ -36,11 +37,7 @@ def _flatten_bval(bval_path, output_path):
     """
     Flatten a bval file to a single row.
     """
-    bval_data = np.loadtxt(bval_path)
-    print(bval_data.shape)
-    
-    np.savetxt(output_path, np.reshape(bval_data, (1, -1)), fmt='%.6f')
-    print(np.reshape(bval_data, (1, -1)).shape)
+    save_flatten_bval(bval_path, output_path)
 
 def animaPreprocessing(
     subject,
@@ -79,7 +76,7 @@ def animaPreprocessing(
     bval = subject.get(suffix='dwi',scope='raw',extension='bval')[0]
     temp_bval = os.path.join(temp_dir, os.path.basename(bval.path))
 
-    _flatten_bval(bval.path, temp_bval)
+    save_flatten_bval(bval.path, temp_bval)
     # shutil.copy2(bval.path, temp_bval)
 
 

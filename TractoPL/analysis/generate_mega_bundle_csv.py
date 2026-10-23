@@ -5,6 +5,7 @@ import numpy as np
 import vtk
 import pandas as pd
 import os
+import tempfile
 import multiprocessing
 import gc
 dataset='actidep'
@@ -27,7 +28,7 @@ def process_bundle(bundle_name):
         print(f'Dataset {dataset}, Bundle {bundle_name} with pipeline mcm {mcm_pipeline} and association {association_pipeline} already done')
         return
     db_root=f'/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids'
-    ds=Dataset(db_root,restore='/tmp/mega_bundle_csv_cache_'+dataset)
+    ds=Dataset(db_root,restore=os.path.join(tempfile.gettempdir(), 'mega_bundle_csv_cache_'+dataset))
     
     vtk_metrics=ds.get_global(pipeline=mcm_pipeline,
         datatype='tracto',
@@ -92,7 +93,7 @@ def process_bundle(bundle_name):
 if __name__ == '__main__':
     bundle_names = get_HCP_bundle_names()
     db_root=f'/home/ndecaux/NAS_EMPENN/share/projects/{dataset}/bids'
-    ds=Dataset(db_root,restore='/tmp/mega_bundle_csv_cache_'+dataset)
+    ds=Dataset(db_root,restore=os.path.join(tempfile.gettempdir(), 'mega_bundle_csv_cache_'+dataset))
 
     n_proc = 8 if os.uname().nodename == 'calcarine' else 1
     with multiprocessing.Pool(n_proc) as pool:

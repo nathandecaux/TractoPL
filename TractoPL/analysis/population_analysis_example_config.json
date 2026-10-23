@@ -19,10 +19,16 @@
         }
     },
     "test_by_group": "GROUP_VARIABLE",
+    "STAT_MODEL": "residualize",
+    "COMBAT_BATCH": null,
+    "COMBAT_EB": true,
+    "COMBAT_MEAN_ONLY": false,
+    "COMBAT_PER_PERMUTATION": false,
     "FWE_METHOD": "clusterFWE",
     "AFQ_ALPHA": 0.05,
     "AFQ_NPERM": 1000,
     "CORRECT_MULTI_TRACT": false,
+    "RANDOM_SEED": null,
     "MULTIPROCESSING": true,
     "MISSING_SUBJECTS_TOLERANCE": 0,
     "INTERPOLATE_MISSING_POINTS": 2,
@@ -33,5 +39,6 @@
         "group": ["hc"]
     },
     "additional_info_path": null,
+    "SAVE_FIGURES": false,
     "output_dir": null
 }

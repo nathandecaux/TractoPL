@@ -1,17 +1,18 @@
 from TractoPL.data.loader import Dataset, BIDSFile
 import pickle
 import os
+import tempfile
 from TractoPL.data.vtk_loader import load_vtk_streamlines
 import numpy as np
 
 mcm_pipeline='mcm_tensors_staniz'
 
-if os.path.exists('/tmp/actidep_ds.pkl'):
-    with open('/tmp/actidep_ds.pkl','rb') as f:
+if os.path.exists(os.path.join(tempfile.gettempdir(), 'actidep_ds.pkl')):
+    with open(os.path.join(tempfile.gettempdir(), 'actidep_ds.pkl'),'rb') as f:
         ds = pickle.load(f)
 else: 
     ds = Dataset()
-    with open('/tmp/actidep_ds.pkl','wb') as f:
+    with open(os.path.join(tempfile.gettempdir(), 'actidep_ds.pkl'),'wb') as f:
         pickle.dump(ds,f)
 
 

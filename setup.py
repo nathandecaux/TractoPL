@@ -24,6 +24,7 @@ setup(
             'tractopl-tractometry=TractoPL.pipeline.tractometry:association',
             'tractopl-connectome=TractoPL.pipeline.connectome:cli',
             'tractopl-quickbundle=TractoPL.scripts.quickbundle:main',
+            'tractopl-report-analysis=TractoPL.analysis.report_analysis:main',
         ],
     },
     install_requires=[

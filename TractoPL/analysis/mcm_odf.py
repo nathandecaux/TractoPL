@@ -23,7 +23,7 @@ def get_dti_principal_direction_sitk(dti_files, weights=None, output_file=None):
         dti_files = [dti_files]
     
     if output_file is None:
-        output_file = '/tmp/principal_direction_sitk.nii.gz'
+        output_file = os.path.join(tempfile.gettempdir(), 'principal_direction_sitk.nii.gz')
     
     all_principal_directions = []
     reference_image = None
@@ -251,7 +251,7 @@ def extract_peaks_from_mcm(mcmfile):
     output_file_sitk = get_dti_principal_direction_sitk(
         tensor_files, 
         weights=tensor_weights,
-        output_file='/tmp/combined_principal_directions.nii.gz'
+        output_file=os.path.join(tempfile.gettempdir(), 'combined_principal_directions.nii.gz')
     )
 
     return output_file_sitk

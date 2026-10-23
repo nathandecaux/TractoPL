@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -328,12 +329,14 @@ from pathlib import Path
 
 def apptainer_prefix(execution: Dict[str, Any]) -> List[str]:
     """Return `apptainer exec` with the dataset, atlas, and checkout mounted."""
-    binds = [execution['db_root']]
+    # Host tempdir (honours $TMPDIR) is bound and exported, since --cleanenv drops it.
+    tmpdir = tempfile.gettempdir()
+    binds = [execution['db_root'], tmpdir]
     if execution['atlas']:
         binds.append(os.path.dirname(os.path.abspath(execution['atlas'])))
     # --pwd keeps the host working directory from shadowing the mounted checkout
     # on sys.path (the image wrappers use `python -m`).
-    prefix = ['apptainer', 'exec', '--cleanenv', '--writable-tmpfs', '--pwd', '/tmp', '--bind', Path.home().as_posix()+':'+Path.home().as_posix(),'--bind','/home/ndecaux:/home/ndecaux']
+    prefix = ['apptainer', 'exec', '--cleanenv', '--writable-tmpfs', '--pwd', tmpdir, '--env', f'TMPDIR={tmpdir}', '--bind', Path.home().as_posix()+':'+Path.home().as_posix(),'--bind','/home/ndecaux:/home/ndecaux']
     for path in dict.fromkeys(binds):
         prefix += ['--bind', f'{path}:{path}']
     prefix += [
@@ -430,7 +433,7 @@ def runner_alive(state: Dict[str, Any]) -> Optional[bool]:
     return time.time() - heartbeat < 6 * job_runner.HEARTBEAT_SECONDS
 
 
-def tail(path: Path, max_lines: int = 400) -> str:
+def tail(path: Path, max_lines: int = 10) -> str:
     """Last lines of a log; reread only when the file changed."""
     try:
         stat = path.stat()
@@ -549,10 +552,13 @@ def relaunch_job(job: Job, log_root: str) -> Optional[str]:
 
 
 def format_duration(task: Dict[str, Any]) -> str:
+    """Duration of a finished task; start time of a running one (it does not go stale)."""
     started = task.get('started')
     if not started:
         return ''
-    seconds = int((task.get('ended') or time.time()) - started)
+    if not task.get('ended'):
+        return f" · since {time.strftime('%H:%M', time.localtime(started))}"
+    seconds = int(task['ended'] - started)
     hours, rest = divmod(seconds, 3600)
     return f' · {hours}h{rest // 60:02d}' if hours else f' · {rest // 60}m{rest % 60:02d}s'
 
@@ -563,6 +569,9 @@ def format_duration(task: Dict[str, Any]) -> str:
 
 NOTIFICATION_HISTORY = 50
 TERMINAL_TASK = {'success', 'failed', 'cancelled', 'interrupted'}
+# Job changes older than this are not announced (e.g. jobs from before the event store).
+EVENT_MAX_AGE_SECONDS = 15 * 60
+EVENT_KEEP_SECONDS = 7 * 24 * 3600
 
 
 def notify(message: str, icon: str = 'ℹ️', duration: str = 'short') -> None:
@@ -574,19 +583,21 @@ def notify(message: str, icon: str = 'ℹ️', duration: str = 'short') -> None:
 
 
 def flush_notifications() -> None:
-    for message, icon, duration in st.session_state.pop('pending_toasts', []):
-        st.toast(message, icon=icon, duration=duration)
+    """Show the queued notifications, grouped in one toast when there are several."""
+    pending = st.session_state.pop('pending_toasts', [])
+    if len(pending) == 1:
+        st.toast(pending[0][0], icon=pending[0][1], duration=pending[0][2])
+    elif pending:
+        important = [icon for _, icon, duration in pending if duration == 'long']
+        st.toast(f'**{len(pending)} notifications**  \n'
+                 + '  \n'.join(f'{icon} {message}' for message, icon, _ in pending),
+                 icon=important[0] if important else pending[0][1],
+                 duration='long' if important else 'short')
 
 
 def jobs_changed() -> None:
     """Forget the cached job list after an action on the log directory."""
     _list_jobs.clear()
-
-
-def snapshot(jobs: List[Job]) -> Dict[str, Dict[str, Any]]:
-    return {job.path.name: {'status': job.status,
-                            'tasks': {(t['subject'], t['step']): t['status'] for t in job.tasks}}
-            for job in jobs}
 
 
 def job_summary(job: Job) -> str:
@@ -596,38 +607,115 @@ def job_summary(job: Job) -> str:
     return ', '.join(parts)
 
 
-def detect_job_events(log_root: str, jobs: List[Job]) -> None:
-    """Notify the changes since the previous look at the log directory.
+# Event store: one small JSON file per job change in <log_root>/.notifications.
+# Several dashboards (possibly on other hosts sharing the directory) look at the
+# same jobs: an event is created with os.link, which fails if it already exists,
+# so each change is recorded exactly once whoever sees it first. Each session
+# then shows the events it has not shown yet.
 
-    The first look at a directory only records the state, so old jobs are not announced.
-    """
-    current = snapshot(jobs)
-    previous_root, previous = st.session_state.get('job_snapshot', (None, None))
-    st.session_state['job_snapshot'] = (log_root, current)
-    if previous is None or previous_root != log_root:
-        return
-    announced = st.session_state.setdefault('announced_jobs', set())
+def events_dir(log_root: str) -> Path:
+    return Path(log_root) / '.notifications'
+
+
+def record_event(log_root: str, key: str, message: str, icon: str, duration: str) -> bool:
+    """Record an event once; False when it already exists (or cannot be written)."""
+    directory = events_dir(log_root)
+    path = directory / f'{key}.json'
+    if path.exists():
+        return False
+    tmp = directory / f'.{key}.{socket.gethostname()}.{os.getpid()}.{threading.get_ident()}.tmp'
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({'time': time.time(), 'message': message, 'icon': icon,
+                                   'duration': duration}))
+        os.link(tmp, path)  # atomic, and fails if another dashboard was first
+        return True
+    except OSError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def record_job_events(log_root: str, jobs: List[Job], known: set) -> None:
+    """Turn the recent changes of the jobs into events; `known` ones are skipped."""
+    now = time.time()
+
+    def record(key: str, *event: str) -> None:
+        if key not in known:
+            record_event(log_root, key, *event)
+
     for job in jobs:
         name = job.path.name
-        before = previous.get(name)
-        if before is None:
-            if name not in announced and job.status in ACTIVE:
-                notify(f'Job {name} started ({len(job.tasks)} task(s)).', '🚀')
-            announced.add(name)
-            before = {'status': None, 'tasks': {}}
-        for (subject, step), status in current[name]['tasks'].items():
-            if status != before['tasks'].get((subject, step)) and status in TERMINAL_TASK:
-                notify(f'sub-{subject} · {step}: {status}', STATUS_ICONS[status],
+        try:
+            changed = max(path.stat().st_mtime for path in (job.path / 'state.json', job.path / 'job.json')
+                          if path.exists())
+        except (OSError, ValueError):
+            continue
+        if now - changed > EVENT_MAX_AGE_SECONDS:
+            continue
+        record(f'{name}__started', f'Job {name} started ({len(job.tasks)} task(s)).', '🚀', 'short')
+        for task in job.tasks:
+            status = task['status']
+            if status in TERMINAL_TASK:
+                record(f"{name}__{task['subject']}__{task['step']}__{status}",
+                       f"sub-{task['subject']} · {task['step']}: {status}", STATUS_ICONS[status],
                        'short' if status == 'success' else 'long')
-        if job.status != before['status'] and job.status not in ACTIVE:
-            notify(f'Job {name} {job.status}: {job_summary(job)}.',
+        if job.status not in ACTIVE:
+            record(f'{name}__job__{job.status}', f'Job {name} {job.status}: {job_summary(job)}.',
                    STATUS_ICONS.get(job.status, '⚠️'), 'long')
 
 
+def prune_events(log_root: str) -> None:
+    now = time.time()
+    for path in events_dir(log_root).glob('*.json'):
+        try:
+            if now - path.stat().st_mtime > EVENT_KEEP_SECONDS:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def seen_events(log_root: str) -> set:
+    """Events this session has already shown (or chose not to show)."""
+    root, seen = st.session_state.get('seen_events', (None, None))
+    if root != log_root:
+        # A new session (or log directory) starts from now: past events are not replayed.
+        prune_events(log_root)
+        seen = {path.stem for path in events_dir(log_root).glob('*.json')}
+        st.session_state['seen_events'] = (log_root, seen)
+    return seen
+
+
+def announce(log_root: str, key: str, message: str, icon: str = '🚀', duration: str = 'short') -> None:
+    """Record an event caused by this session and show it here right away."""
+    record_event(log_root, key, message, icon, duration)
+    seen_events(log_root).add(key)
+    notify(message, icon, duration)
+
+
+def show_new_events(log_root: str) -> None:
+    seen = seen_events(log_root)
+    events = []
+    for path in events_dir(log_root).glob('*.json'):
+        if path.stem in seen:
+            continue
+        event = read_json(path, None)
+        seen.add(path.stem)
+        if isinstance(event, dict):
+            events.append(event)
+    for event in sorted(events, key=lambda event: event.get('time', 0)):
+        notify(event.get('message', ''), event.get('icon', 'ℹ️'), event.get('duration', 'short'))
+
+
 def job_watcher(log_root: str) -> None:
-    """Sidebar summary of the jobs; notifies their changes on every page."""
+    """Sidebar summary of the jobs; notifies their changes on every page.
+
+    Runs every 5 s: everything that happened in between comes as one toast.
+    """
     jobs = list_jobs(log_root)
-    detect_job_events(log_root, jobs)
+    root, seen = st.session_state.get('seen_events', (None, None))
+    record_job_events(log_root, jobs, seen if root == log_root else set())
+    show_new_events(log_root)
     flush_notifications()
     active = [job for job in jobs if job.status in ACTIVE]
     running_tasks = sum(t['status'] == 'running' for job in active for t in job.tasks)
@@ -644,9 +732,23 @@ def job_watcher(log_root: str) -> None:
             st.rerun()
 
 
+def jobs_signature(jobs: List[Job]) -> tuple:
+    return tuple((job.path.name, job.status, tuple(t['status'] for t in job.tasks)) for job in jobs)
+
+
+def watch_jobs(log_root: str) -> None:
+    """Redraw the Jobs page only when a job or task status changed.
+
+    The logs of running tasks refresh on their own (see render_task).
+    """
+    if jobs_signature(list_jobs(log_root)) != st.session_state.get('jobs_rendered'):
+        st.rerun()
+
+
 def render_jobs(log_root: str) -> None:
     """One card per participant/step, reloaded from the log directory."""
     jobs = list_jobs(log_root)
+    st.session_state['jobs_rendered'] = jobs_signature(jobs)
     bad_jobs = [job for job in jobs if job.status in FINISHED_BAD]
 
     toolbar = st.columns([2, 2, 3])
@@ -663,61 +765,107 @@ def render_jobs(log_root: str) -> None:
             notify(f'Deleted {len(bad_jobs)} failed / interrupted job(s).', '🗑️')
             st.rerun()
 
-    if not jobs:
+    shown = [job for job in jobs if not (hide_success and job.status == 'success')]
+    if not shown:
         st.caption(f'No job found in {log_root}.')
         return
-    for job in jobs:
-        if hide_success and job.status == 'success':
-            continue
+    job = select_job(shown)
+    if job is not None:
         render_job(job, log_root, show_closed)
+
+
+def select_job(jobs: List[Job]) -> Optional[Job]:
+    """One compact row per job; the clicked one is detailed below the table.
+
+    The selection is remembered by job name: a new job shifts the rows, so the
+    table gets a new key (its row selection is reset) whenever its rows change.
+    """
+    names = [job.path.name for job in jobs]
+    rows = []
+    for job in jobs:
+        counts = {status: sum(t['status'] == status for t in job.tasks) for status in STATUS_ICONS}
+        rows.append({
+            'Status': f"{STATUS_ICONS.get(job.status, '⚠️')} {job.status}",
+            'Job': job.path.name,
+            'Done': f"{counts['success']}/{len(job.tasks)}",
+            'Running': counts['running'],
+            'Failed': counts['failed'] + counts['interrupted'],
+            'Participants': ', '.join(dict.fromkeys(f"sub-{t['subject']}" for t in job.tasks)),
+        })
+
+    key = f'jobs_table_{abs(hash(tuple(names)))}'
+
+    def remember_selection() -> None:
+        selected = st.session_state[key].selection.rows
+        if selected:
+            st.session_state['selected_job'] = names[selected[0]]
+
+    st.dataframe(pd.DataFrame(rows), hide_index=True, on_select=remember_selection,
+                 selection_mode='single-row', key=key, height=min(38 + 35 * len(rows), 300))
+    selected = st.session_state.get('selected_job')
+    if selected not in names:
+        # Default to the most recent job.
+        selected = names[0]
+    return jobs[names.index(selected)]
+
+
+def lazy_expander(label: str, key: str, expanded: bool):
+    """Expander whose content runs only while it is open.
+
+    Its label and initial state must stay the same across reruns, otherwise
+    Streamlit sees a new widget and collapses it: the initial state is frozen
+    on first display.
+    """
+    expanded = st.session_state.setdefault(f'{key}_initial', expanded)
+    return st.expander(label, expanded=expanded, key=key, on_change='rerun')
 
 
 def render_job(job: Job, log_root: str, show_closed: bool) -> None:
     name = job.path.name
-    closed = set(read_json(job.path / 'closed.json', []))
     counts = {status: sum(t['status'] == status for t in job.tasks) for status in STATUS_ICONS}
-    with st.expander(
-        f"{STATUS_ICONS.get(job.status, '⚠️')} Job {name} — {job.status} "
+    st.markdown(
+        f"#### {STATUS_ICONS.get(job.status, '⚠️')} Job {name} — {job.status} "
         f"({counts['success']}/{len(job.tasks)} done, {counts['running']} running, "
-        f"{counts['failed']} failed)",
-        expanded=job.status in ACTIVE,
-    ):
-        st.caption(f"{job.path}" + (f" · host {job.state['host']}, pid {job.state.get('pid')}"
-                                     if job.state.get('host') else ''))
-        actions = st.columns(4)
-        if job.status in ('running', 'starting') and actions[0].button('Cancel job', key=f'cancel_{name}'):
-            request_cancel(job)
+        f"{counts['failed']} failed)"
+    )
+    closed = set(read_json(job.path / 'closed.json', []))
+    st.caption(f"{job.path}" + (f" · host {job.state['host']}, pid {job.state.get('pid')}"
+                                 if job.state.get('host') else ''))
+    actions = st.columns(4)
+    if job.status in ('running', 'starting') and actions[0].button('Cancel job', key=f'cancel_{name}'):
+        request_cancel(job)
+        jobs_changed()
+        notify(f'Cancellation requested for job {name}.', '🛑')
+        st.rerun()
+    if job.status not in ACTIVE:
+        if any(t['status'] in RETRY_TASKS for t in job.tasks) and \
+                actions[1].button('Relaunch unfinished tasks', key=f'relaunch_{name}'):
+            new_job = relaunch_job(job, log_root)
+            if new_job:
+                announce(log_root, f'{new_job}__started', f'Job {new_job} started: unfinished tasks of {name}.')
             jobs_changed()
-            notify(f'Cancellation requested for job {name}.', '🛑')
             st.rerun()
-        if job.status not in ACTIVE:
-            if any(t['status'] in RETRY_TASKS for t in job.tasks) and \
-                    actions[1].button('Relaunch unfinished tasks', key=f'relaunch_{name}'):
-                new_job = relaunch_job(job, log_root)
-                if new_job:
-                    st.session_state.setdefault('announced_jobs', set()).add(new_job)
-                    notify(f'Job {new_job} started: unfinished tasks of {name}.', '🚀')
-                jobs_changed()
-                st.rerun()
-            if actions[2].button('Delete job', key=f'delete_{name}'):
-                delete_job(job)
-                jobs_changed()
-                notify(f'Job {name} deleted.', '🗑️')
-                st.rerun()
-        if job.state.get('error'):
-            st.error('The runner crashed.')
-            st.code(job.state['error'], language='text')
-        if job.status == 'interrupted':
-            st.warning('The runner stopped without finishing (killed or machine restarted).')
-        if not job.tasks or job.status == 'interrupted' and not job.state:
-            with st.expander('Runner log'):
+        if actions[2].button('Delete job', key=f'delete_{name}'):
+            delete_job(job)
+            jobs_changed()
+            notify(f'Job {name} deleted.', '🗑️')
+            st.rerun()
+    if job.state.get('error'):
+        st.error('The runner crashed.')
+        st.code(job.state['error'], language='text')
+    if job.status == 'interrupted':
+        st.warning('The runner stopped without finishing (killed or machine restarted).')
+    if not job.tasks or job.status == 'interrupted' and not job.state:
+        runner_log = lazy_expander('Runner log', f'runner_log_{name}', False)
+        with runner_log:
+            if runner_log.open:
                 st.code(tail(job.path / 'runner.log'), language='text')
 
-        for task in job.tasks:
-            card_id = f"{task['subject']}_{task['step']}"
-            if card_id in closed and not show_closed:
-                continue
-            render_task(job, task, card_id, closed)
+    for task in job.tasks:
+        card_id = f"{task['subject']}_{task['step']}"
+        if card_id in closed and not show_closed:
+            continue
+        render_task(job, task, card_id, closed)
 
 
 def render_task(job: Job, task: Dict[str, Any], card_id: str, closed: set) -> None:
@@ -750,12 +898,23 @@ def render_task(job: Job, task: Dict[str, Any], card_id: str, closed: set) -> No
         log_path = job.path / task['log']
         if task['status'] in ('pending', 'skipped') and not log_path.is_file():
             return
-        with st.expander('Logs', expanded=task['status'] in ('running', 'failed')):
-            st.code(tail(log_path), language='text')
+        logs = lazy_expander('Logs', f'logs_{name}_{card_id}', task['status'] in ('running', 'failed'))
+        with logs:
+            if not logs.open:
+                return
+            if task['status'] == 'running':
+                st.fragment(run_every=5)(show_log)(log_path)
+            else:
+                show_log(log_path)
             if log_path.is_file():
                 st.download_button('Download full log', log_path.read_bytes,
                                    file_name=f'{name}_{task["log"]}',
                                    key=f'dl_{name}_{card_id}', on_click='ignore')
+
+
+def show_log(log_path: Path) -> None:
+    # tail() rereads the file only when its size or mtime changed.
+    st.code(tail(log_path), language='text')
 
 
 def write_closed(job_dir: Path, closed: set) -> None:
@@ -1360,20 +1519,16 @@ def pipeline_page() -> None:
         ]
         job_name = submit_job(log_root, int(n_workers), tasks)
         jobs_changed()
-        st.session_state.setdefault('announced_jobs', set()).add(job_name)
-        notify(f'Job {job_name} started: {len(tasks)} task(s), {int(n_workers)} parallel participant(s).', '🚀')
+        announce(log_root, f'{job_name}__started',
+                 f'Job {job_name} started: {len(tasks)} task(s), {int(n_workers)} parallel participant(s).')
         flush_notifications()
         st.success(f'Job {job_name} started: {len(tasks)} task(s), {int(n_workers)} parallel participant(s). '
                    'Follow it on the Jobs page.')
 
 
 def jobs_page() -> None:
-    if hasattr(st, 'fragment'):
-        st.fragment(run_every=5)(render_jobs)(log_root)
-    else:
-        render_jobs(log_root)
-        if st.button('Refresh jobs'):
-            st.rerun()
+    render_jobs(log_root)
+    st.fragment(run_every=5)(watch_jobs)(log_root)
 
 
 with st.sidebar:

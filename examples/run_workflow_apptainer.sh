@@ -31,9 +31,13 @@ command -v apptainer >/dev/null || {
     exit 127
 }
 
+tmpdir=${TMPDIR:-/tmp}
+
 apptainer exec \
     --cleanenv \
     --writable-tmpfs \
+    --bind "$tmpdir:$tmpdir" \
+    --env "TMPDIR=$tmpdir" \
     --bind "$checkout:/opt/tractopl" \
     --bind "$dataset_root:$dataset_root" \
     --bind "$atlas_dir:$atlas_dir" \

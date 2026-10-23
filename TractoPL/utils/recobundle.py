@@ -329,7 +329,7 @@ def register_anat_subject_to_template(subject, template_path, tractogram, atlas_
     )
 
     # Save the transformation matrix to a file
-    transform_file = "/tmp/affine.mat"
+    transform_file = os.path.join(tempfile.gettempdir(), "affine.mat")
     # ANTs transforms are saved during registration, we just need to use the fwdtransforms
     shutil.copy(registration['fwdtransforms'][0], transform_file)
     # Apply the transformation to the moving image
@@ -341,7 +341,7 @@ def register_anat_subject_to_template(subject, template_path, tractogram, atlas_
     )
 
     # Save the moved image
-    moved_img_path = "/tmp/moved_ref.nii.gz"
+    moved_img_path = os.path.join(tempfile.gettempdir(), "moved_ref.nii.gz")
     ants.image_write(moved_img, moved_img_path)
 
     res_dict = {

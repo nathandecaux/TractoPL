@@ -11,9 +11,13 @@ image=$1
 tractopl_dir=$2
 dataset_root=$3
 
+tmpdir=${TMPDIR:-/tmp}
+
 apptainer exec \
     --cleanenv \
     --writable-tmpfs \
+    --bind "$tmpdir:$tmpdir" \
+    --env "TMPDIR=$tmpdir" \
     --bind "$tractopl_dir:/opt/tractopl" \
     --bind "$dataset_root:$dataset_root" \
     --bind "$dataset_root:$dataset_root" \

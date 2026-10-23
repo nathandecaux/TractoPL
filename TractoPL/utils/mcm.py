@@ -11,6 +11,7 @@ from TractoPL.data.loader import Subject, move2nii, parse_filename, BIDSFile, co
 from TractoPL.data.mcmfile import MCMFile, read_mcm_file
 from TractoPL.utils.tools import del_key, upt_dict, add_kwargs_to_cli, CLIArg, run_anima_command, run_cli_command
 from TractoPL.utils.converters import call_dipy_converter
+from TractoPL.utils.mat import save_flatten_bval
 import SimpleITK as sitk
 import json
 import tempfile
@@ -225,8 +226,14 @@ def mcm_estimator(dwi, bval, bvec, mask, compart_map=None, n_comparts=None, **kw
     }
 
     # Construire les arguments de commande avec des références symboliques (copie les fichiers dans un dossier temporaire)
+
+
+    # Flatten the bval file before passing it to the command
+    temp_bval = os.path.join(tempfile.gettempdir(), os.path.basename(bval.path))
+    save_flatten_bval(bval.path, temp_bval)
+
     command_args = [
-        "-b", "$bval",
+        "-b", temp_bval,
         "-g", "$bvec",
         "-i", "$dwi",
         "-m", "$mask",
@@ -2347,7 +2354,7 @@ if __name__ == "__main__":
         res_dict=generate_scalar_map(
             vtk_file_path=f,
             reference_nifti_path="/home/ndecaux/NAS_EMPENN/share/projects/HCP105_Zenodo_NewTrkFormat/inGroupe1Space/Atlas/average_fa.nii.gz",
-            output_dir=f'/tmp/{f.subject}',
+            output_dir=os.path.join(tempfile.gettempdir(), f.subject),
             )
     
         copy_from_dict(subject=dataset.get_subject(f.subject),

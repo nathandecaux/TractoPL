@@ -1,4 +1,5 @@
 import os
+import tempfile
 import json
 import pathlib
 import nibabel as nib
@@ -14,6 +15,8 @@ from dipy.io.streamline import load_trk, save_trk, load_tck, save_tck
 from dipy.io.streamline import load_tractogram, save_tractogram, StatefulTractogram, Space
 from dipy.tracking.streamline import Streamlines
 from concurrent.futures import ThreadPoolExecutor
+
+DEFAULT_RESTORE_PATH = os.path.join(tempfile.gettempdir(), 'actidep.pkl')
 
 _SENTINEL = object()  # Défini au niveau du module
 
@@ -60,8 +63,9 @@ class BIDSFile:
         path = os.fspath(path)
         # Emplacement dans le dataset (peut être un lien symbolique)
         self.bids_path = os.path.abspath(path)
-        # Chemin réel : les liens symboliques sont résolus
-        self.path = os.path.realpath(path)
+        # Chemin réel résolu à la demande (cf. propriété path) : un realpath par
+        # fichier coûte un lstat par composant du chemin, très lent sur NFS
+        self._path = None
         # Le nom BIDS (et donc les entités) vient du lien, pas de la cible
         self.filename = os.path.basename(path)
         if row is not None:
@@ -107,6 +111,18 @@ class BIDSFile:
         if 'entities' in self.__dict__ and item in self.entities:
             return self.entities[item]
         raise AttributeError(f"{self.__class__.__name__} object has no attribute '{item}'")
+
+    @property
+    def path(self):
+        """Chemin réel : le lien symbolique éventuel est résolu (au premier accès)."""
+        if self.__dict__.get('_path') is None:
+            p = self.bids_path
+            self._path = os.path.realpath(p) if os.path.islink(p) else p
+        return self._path
+
+    @path.setter
+    def path(self, value):
+        self._path = value
 
     @property
     def extension(self):  # compat explicite si code externe attend une propriété
@@ -538,12 +554,12 @@ class Dataset:
         self._RESERVED = frozenset(('path', 'subject', 'session', 'datatype', 'pipeline',
                             'derivative', 'extension', 'suffix'))
         if restore:
-            if restore and os.path.exists(restore if isinstance(restore, str) else '/tmp/actidep.pkl'):
+            if restore and os.path.exists(restore if isinstance(restore, str) else DEFAULT_RESTORE_PATH):
                 self.restore(restore)
             else:
                 print(Warning("Fichier de restauration introuvable, initialisation normale."))
                 self.build_dataframe()
-                self.save(restore if isinstance(restore, str) else '/tmp/actidep.pkl')
+                self.save(restore if isinstance(restore, str) else DEFAULT_RESTORE_PATH)
 
         else:
             try:
@@ -863,16 +879,16 @@ class Dataset:
         self._subjects_cache.clear()
         return True
 
-    def save(self,filepath='/tmp/actidep.pkl'):
+    def save(self,filepath=DEFAULT_RESTORE_PATH):
         print(f'Saving Dataset state to {filepath}')
         with open(filepath,'wb') as f:
             pickle.dump(self,f)
         print('Save complete')
         return filepath
     
-    def restore(self,filepath='/tmp/actidep.pkl'):
+    def restore(self,filepath=DEFAULT_RESTORE_PATH):
         if filepath == True:
-            filepath='/tmp/actidep.pkl'
+            filepath=DEFAULT_RESTORE_PATH
         if not os.path.exists(filepath):
             self.save(filepath)
         with open(filepath,'rb') as f:

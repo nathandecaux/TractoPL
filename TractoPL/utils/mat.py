@@ -25,6 +25,16 @@ def tensor_components_to_matrix(components: np.ndarray) -> np.ndarray:
     
     return tensors
 
+def save_flatten_bval(bval_path, output_path):
+    """
+    Flatten a bval file to a single row.
+    """
+    bval_data = np.loadtxt(bval_path)
+    print(bval_data.shape)
+    
+    np.savetxt(output_path, np.reshape(bval_data, (1, -1)), fmt='%.6f')
+    print(np.reshape(bval_data, (1, -1)).shape)
+
 
 def extract_principal_eigenvector(tensors: np.ndarray, threshold: float = 0.01) -> np.ndarray:
     """Extrait le vecteur propre principal de chaque tenseur."""
