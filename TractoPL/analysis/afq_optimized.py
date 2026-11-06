@@ -28,9 +28,10 @@ def _corr_vectorized(a, b):
     return r, p
 
 
-def AFQ_MultiCompCorrection(data=None, y=None, alpha=0.05, cThresh=None, nperm=1000):
+def AFQ_MultiCompCorrection(data=None, y=None, alpha=0.05, cThresh=None, nperm=1000, rng=None):
     """
     Optimized permutation-based multiple comparison correction.
+    rng: seed or numpy Generator, for reproducible permutations (None = random).
     """
     if cThresh is None:
         cThresh = alpha
@@ -53,7 +54,7 @@ def AFQ_MultiCompCorrection(data=None, y=None, alpha=0.05, cThresh=None, nperm=1
     clusMax = np.zeros(nperm)
     stats = {}
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(rng)
 
     if stattest == 'corr':
         for ii in range(nperm):

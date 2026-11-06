@@ -25,6 +25,11 @@ setup(
             'tractopl-connectome=TractoPL.pipeline.connectome:cli',
             'tractopl-quickbundle=TractoPL.scripts.quickbundle:main',
             'tractopl-report-analysis=TractoPL.analysis.report_analysis:main',
+            'tractopl-gui=TractoPL.dashboard.apps:home',
+            'tractopl-gui-pipeline=TractoPL.dashboard.apps:pipeline',
+            'tractopl-gui-analysis=TractoPL.dashboard.apps:analysis',
+            'tractopl-gui-dashboard=TractoPL.dashboard.apps:dashboard',
+            'tractopl-gui-report=TractoPL.dashboard.apps:report',
         ],
     },
     install_requires=[
@@ -44,7 +49,7 @@ setup(
         'lpqtree',
     ],
     extras_require={
-        'dashboard': ['plotly', 'statsmodels', 'streamlit'],
+        'dashboard': ['plotly', 'statsmodels', 'streamlit', 'panel', 'hvplot'],
         'dev': ['pytest'],
     },
     package_data={'TractoPL': ['config_profiles/*.json']},

@@ -20,6 +20,7 @@
     },
     "test_by_group": "GROUP_VARIABLE",
     "STAT_MODEL": "residualize",
+    "ANCOVA_COV_TYPE": "HC3",
     "COMBAT_BATCH": null,
     "COMBAT_EB": true,
     "COMBAT_MEAN_ONLY": false,

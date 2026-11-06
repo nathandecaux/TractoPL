@@ -29,6 +29,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+from TractoPL.configuration import ConfigurationError, load_atlas_config
 from TractoPL.dashboard import job_runner
 from TractoPL.data.loader import Dataset
 
@@ -156,9 +157,22 @@ def mcm_archive(pipeline):
     return Check('MCM archive', dict(pipeline=pipeline, extension='mcmx'))
 
 
-def segmented_bundles(pipeline):
-    return Check('Segmented bundles', dict(pipeline=pipeline, datatype='tracto', suffix='tracto',
-                                           extension='trk'))
+def atlas_bundles(atlas: str) -> List[str]:
+    """Bundle names listed in the atlas manifest, or [] when it cannot be read."""
+    if not atlas:
+        return []
+    try:
+        return sorted(load_atlas_config(atlas).bundle_mapping or {})
+    except ConfigurationError:
+        return []
+
+
+def segmented_bundles(pipeline, atlas=''):
+    filters = dict(pipeline=pipeline, datatype='tracto', suffix='tracto', extension='trk')
+    bundles = atlas_bundles(atlas)
+    if not bundles:
+        return Check('Segmented bundles', filters)
+    return Check('Segmented bundles', dict(filters, bundle=bundles), len(bundles))
 
 
 def subject_centroids(pipeline, clustering='centroid'):
@@ -226,7 +240,7 @@ def step_io(step: str, params: Dict[str, Any]):
             Check('Transforms', dict(pipeline='bundle_seg', suffix='xfm',
                                      desc=['0GenericAffine', '1InverseWarp']), 2),
             subject_centroids('bundle_seg'),
-            segmented_bundles('bundle_seg'),
+            segmented_bundles('bundle_seg', params['atlas']),
         ]
         return inputs, outputs
 
@@ -234,7 +248,7 @@ def step_io(step: str, params: Dict[str, Any]):
         inputs = [
             mcm_archive(params['projection_mcm_pipeline']),
             fa_map(),
-            segmented_bundles(params['projection_bundle_pipeline']),
+            segmented_bundles(params['projection_bundle_pipeline'], params['atlas']),
         ]
         return inputs, [metric_bundles(params['projection_mcm_pipeline'])]
 
@@ -305,13 +319,18 @@ def build_command(step: str, subject: str, params: Dict[str, Any]) -> List[str]:
         command = ['tractopl-bundle-seg', 'segmentation'] + common + ['--atlas', params['atlas']]
         if params['keep_intermediate']:
             command.append('--keep-intermediate')
+        if params['bundle_seg_overwrite']:
+            command.append('--overwrite')
         return command
 
     if step == 'mcm_projection':
-        return ['tractopl-mcm', 'projection'] + common + [
+        command = ['tractopl-mcm', 'projection'] + common + [
             '--pipeline', params['projection_mcm_pipeline'],
             '--bundle-pipeline', params['projection_bundle_pipeline'],
         ]
+        if params['projection_overwrite']:
+            command.append('--overwrite')
+        return command
 
     if step == 'tractometry':
         return ['tractopl-tractometry', 'association'] + common + [
@@ -986,6 +1005,8 @@ COMMON_SETTINGS = {
     'optimizer': _choice(OPTIMIZERS),
     'n_threads': _number(0, 256),
     'keep_intermediate': _flag,
+    'bundle_seg_overwrite': _flag,
+    'projection_overwrite': _flag,
     'projection_mcm_pipeline': _text,
     'projection_bundle_pipeline': _text,
     'tractometry_pipeline': _text,
@@ -1016,6 +1037,8 @@ DEFAULTS: Dict[str, Any] = {
     'ml_mode': 2,
     'n_threads': 0,
     'keep_intermediate': False,
+    'bundle_seg_overwrite': False,
+    'projection_overwrite': False,
     'n_pts': 100,
 }
 # Settings that only make sense for one dataset.
@@ -1261,13 +1284,22 @@ def command_available(name: str) -> bool:
     return name in available_commands
 
 
+def check_icon(count: int, expected: int) -> str:
+    """✅ when complete, ⚠️ when partial, ❌ when absent; counts shown when several files are expected."""
+    icon = '✅' if count >= expected else '⚠️' if count else '❌'
+    return icon if expected == 1 else f'{min(count, expected)}/{expected} {icon}'
+
+
 def render_checks(title: str, checks: List[Check]) -> pd.DataFrame:
     """Show which selected participants have each expected file."""
     table = check_table(dataset, checks, subjects)
     done = len(complete_subjects(table))
     st.markdown(f"**{title}** — {done}/{len(subjects)} participants complete")
     if len(table.columns):
-        icons = table.apply(lambda column: column.map({True: '✅', False: '❌'}))
+        icons = pd.DataFrame(index=subjects)
+        for check in checks:
+            counts = _cached_counts(dataset, id(dataset), check, tuple(subjects))
+            icons[check.label] = [check_icon(counts[subject], check.min_count) for subject in subjects]
         st.dataframe(icons.rename(index=lambda subject: f'sub-{subject}'))
     return table
 
@@ -1411,6 +1443,10 @@ def bundle_seg_options():
     params['keep_intermediate'] = st.checkbox(
         'Keep intermediate files', key='keep_intermediate'
     )
+    params['bundle_seg_overwrite'] = st.checkbox(
+        'Overwrite existing outputs', key='bundle_seg_overwrite',
+        help='Redoes the registration and replaces the segmented bundles of each subject.',
+    )
 
 
 def mcm_projection_options():
@@ -1423,6 +1459,10 @@ def mcm_projection_options():
         params['projection_bundle_pipeline'] = pipeline_selector(
             'Bundle pipeline', 'bundle_seg', 'projection_bundle_pipeline'
         )
+    params['projection_overwrite'] = st.checkbox(
+        'Overwrite existing outputs', key='projection_overwrite',
+        help='Deletes the existing bundle outputs of this MCM pipeline before recomputing them.',
+    )
 
 
 def tractometry_options():

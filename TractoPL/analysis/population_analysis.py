@@ -19,22 +19,34 @@ available (config key "STAT_MODEL"):
     Pearson / Spearman correlation is computed on the residuals.
 
 "glm"
-    A general linear model is fitted at each point:
+    An OLS model is fitted with statsmodels at each point:
 
         metric ~ 1 + variable + confounds
 
-    (a categorical variable is dummy-coded, first level = reference) and the
-    variable's terms are tested with a partial F-test (equivalent to the
-    t-test of the slope when there is a single term). The degrees of freedom
-    account for the confounds; the reported r of a correlation is the partial
-    correlation. CORRELATION_TEST and CORRECT_METRIC_CONFOND_ONLY do not apply.
+    - group variables: ANCOVA with robust standard errors (ANCOVA_COV_TYPE,
+      HC3 by default, valid with unequal group sizes and variances). With 2
+      groups, diff is the adjusted difference (group 1 - group 0) and p comes
+      from its t-test; with more groups, Wald F-test of the group dummies.
+    - correlation variables: classical OLS, t-test of the slope; r is the
+      partial correlation (degrees of freedom account for the confounds).
+
+    CORRELATION_TEST and CORRECT_METRIC_CONFOND_ONLY do not apply to the tests.
 
 The family-wise error along each bundle is controlled by permutations
-(AFQ_NPERM), with a min p-value threshold (alphaFWE), a cluster size threshold
-(clusterFWE) or both (mixed), see FWE_METHOD. In GLM mode the permutations
-follow the Freedman-Lane scheme: the residuals of the confounds-only model are
-permuted, which keeps the confounds' effect under the null hypothesis. With
-CORRECT_MULTI_TRACT the thresholds are computed once over all the bundles.
+(AFQ_NPERM): min p-value threshold (alphaFWE), cluster size threshold
+(clusterFWE) or both (mixed), see FWE_METHOD.
+
+- "residualize" model: AFQ correction (AFQ_MultiCompCorrection), computed on
+  the metric and the variable with the confounds regressed out. With more than
+  2 groups (not handled by AFQ_MultiCompCorrection) the same procedure is run
+  with a one-way ANOVA.
+- "glm" model: Freedman-Lane permutations. The residuals of the confounds-only
+  model are permuted and added back to its fitted values, and the same GLM
+  test as the observed one (same covariance type) is computed on each
+  permuted dataset.
+
+With CORRECT_MULTI_TRACT the thresholds are computed once over the
+concatenated profiles of all bundles.
 
 Categorical confounds (non-numeric columns) are dummy-coded in both models.
 
@@ -56,15 +68,17 @@ from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for server-side plotting
 import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
-from scipy.stats import f as f_dist
 from scipy.stats import f_oneway, rankdata, ttest_ind
+from scipy.stats import f as f_dist
 from scipy.stats import t as t_dist
 from tqdm import tqdm
 
+from TractoPL.analysis.afq_optimized import AFQ_MultiCompCorrection
 from TractoPL.data.loader import Dataset
 from TractoPL.set_config import get_HCP_bundle_names
 
@@ -91,6 +105,7 @@ DEFAULT_CONFIG = {
 
     # --- Statistical model ---
     "STAT_MODEL": "residualize",    # "residualize" or "glm" (see module docstring)
+    "ANCOVA_COV_TYPE": "HC3",       # "glm" model, group variables: statsmodels cov_type
 
     # --- Multiple comparison correction ---
     "FWE_METHOD": "clusterFWE",     # "clusterFWE", "alphaFWE", or "mixed"
@@ -127,6 +142,7 @@ DEFAULT_CONFIG = {
 }
 
 STAT_MODELS = ("residualize", "glm")
+ANCOVA_COV_TYPES = ("HC3", "HC2", "HC1", "HC0", "nonrobust")
 FWE_METHODS = ("clusterFWE", "alphaFWE", "mixed")
 CORRELATION_TESTS = ("pearson", "spearman")
 MIN_SUBJECTS = 4
@@ -157,7 +173,8 @@ def validate_config(config: Dict) -> None:
     pipeline_name = config.get("hcp_asso_pipeline")
     if not isinstance(pipeline_name, str) or not pipeline_name:
         raise ValueError("Configuration key 'hcp_asso_pipeline' must be a pipeline name")
-    for key, allowed in (("STAT_MODEL", STAT_MODELS), ("FWE_METHOD", FWE_METHODS),
+    for key, allowed in (("STAT_MODEL", STAT_MODELS), ("ANCOVA_COV_TYPE", ANCOVA_COV_TYPES),
+                         ("FWE_METHOD", FWE_METHODS),
                          ("CORRELATION_TEST", CORRELATION_TESTS)):
         value = config.get(key) or DEFAULT_CONFIG[key]
         if value not in allowed:
@@ -179,6 +196,7 @@ class Settings:
     corr_variables: Dict[str, List[str]]    # variable -> confounds
     test_by_group: Optional[str] = None
     stat_model: str = "residualize"
+    ancova_cov_type: str = "HC3"
     fwe_method: str = "clusterFWE"
     alpha: float = 0.05
     nperm: int = 1000
@@ -213,6 +231,7 @@ class Settings:
             corr_variables=variables("corr_variables"),
             test_by_group=config.get("test_by_group") or None,
             stat_model=get("STAT_MODEL"),
+            ancova_cov_type=get("ANCOVA_COV_TYPE"),
             fwe_method=get("FWE_METHOD"),
             alpha=float(get("AFQ_ALPHA")),
             nperm=int(get("AFQ_NPERM")),
@@ -533,7 +552,6 @@ class UnitData:
     x: np.ndarray           # group codes 0..k-1 (group) or variable values (corr)
     confounds: np.ndarray   # (n_subjects, n_columns), categorical confounds dummy-coded
     levels: list            # group levels in code order (group analyses only)
-    segments: List[Tuple[int, int]]  # column ranges of separate profiles (bundles in multi-tract)
 
 
 def encode_confounds(meta: pd.DataFrame, columns: List[str]) -> np.ndarray:
@@ -554,8 +572,7 @@ def encode_confounds(meta: pd.DataFrame, columns: List[str]) -> np.ndarray:
 
 
 def build_unit_data(pivot: pd.DataFrame, meta: pd.DataFrame, var: str, confounds: List[str],
-                    kind: str, segments: Optional[List[Tuple[int, int]]] = None
-                    ) -> Optional[UnitData]:
+                    kind: str) -> Optional[UnitData]:
     """
     Keep the subjects with a complete profile and non-missing variable and
     confounds, and encode the variable (group codes, or numeric values).
@@ -590,22 +607,25 @@ def build_unit_data(pivot: pd.DataFrame, meta: pd.DataFrame, var: str, confounds
         x=x_values,
         confounds=encode_confounds(meta, conf_cols),
         levels=levels,
-        segments=segments or [(0, pivot.shape[1])],
     )
 
 
 # ============================================================================
 # POINTWISE TESTS
 # ============================================================================
-# A test returns its observed statistics (one value per point) and a function
-# giving the p-values after permuting the subjects, used by the FWE correction.
+# A test returns its observed statistics (one value per point) and the data the
+# AFQ correction is computed on (metric and variable with confounds removed), or
+# for the GLM a function giving the p-values of one Freedman-Lane permutation.
 # ============================================================================
 
 @dataclass
 class PointwiseTest:
     stats: Dict[str, np.ndarray]    # observed statistics per point, always with "p_raw"
     values: np.ndarray              # (n_subjects, n_points) values the group means are computed on
-    permuted_pvalues: Callable[[np.ndarray], np.ndarray]  # permutation of the subjects -> p-values
+    afq_data: np.ndarray            # (n_subjects, n_points) metric given to AFQ_MultiCompCorrection
+    afq_y: np.ndarray               # group codes or variable given to AFQ_MultiCompCorrection
+    # GLM only: random generator -> p-values of one permutation (replaces the AFQ correction)
+    permuted_pvalues: Optional[Callable[[np.random.Generator], np.ndarray]] = None
 
 
 def _residualize(Y: np.ndarray, C: np.ndarray) -> np.ndarray:
@@ -640,79 +660,158 @@ def _group_test(Y: np.ndarray, codes: np.ndarray, n_groups: int):
         return f_oneway(*groups, axis=0)
 
 
+def _afq_inputs(data: UnitData, kind: str, settings: Settings) -> Tuple[np.ndarray, np.ndarray]:
+    """Data of the AFQ correction: metric with the confounds regressed out, and group
+    codes (group) or the variable with the confounds regressed out (corr)."""
+    Y = _residualize(data.Y, data.confounds)
+    if kind == "group":
+        return Y, data.x
+    x = data.x if settings.correct_metric_only else _residualize(data.x, data.confounds)
+    return Y, x
+
+
 def residualize_test(data: UnitData, kind: str, settings: Settings) -> PointwiseTest:
     """Confounds regressed out by OLS, then t-test/ANOVA or correlation on the residuals."""
-    Y = _residualize(data.Y, data.confounds)
+    Y, x = _afq_inputs(data, kind, settings)
 
     if kind == "group":
         n_groups = len(data.levels)
         res = _group_test(Y, data.x, n_groups)
         diff = (Y[data.x == 1].mean(axis=0) - Y[data.x == 0].mean(axis=0) if n_groups == 2
                 else np.full(Y.shape[1], np.nan))
-        return PointwiseTest(
-            stats={"p_raw": res.pvalue, "diff": diff, "stat": res.statistic},
-            values=Y,
-            permuted_pvalues=lambda perm: _group_test(Y, data.x[perm], n_groups).pvalue,
-        )
+        return PointwiseTest(stats={"p_raw": res.pvalue, "diff": diff, "stat": res.statistic},
+                             values=Y, afq_data=Y, afq_y=x)
 
-    x = data.x if settings.correct_metric_only else _residualize(data.x, data.confounds)
     if settings.correlation_test == "spearman":
-        Y, x = rankdata(Y, axis=0), rankdata(x)
-    r, p = _pearson(x, Y)
-    return PointwiseTest(stats={"r": r, "p_raw": p}, values=Y,
-                         permuted_pvalues=lambda perm: _pearson(x[perm], Y)[1])
+        r, p = _pearson(rankdata(x), rankdata(Y, axis=0))
+    else:
+        r, p = _pearson(x, Y)
+    return PointwiseTest(stats={"r": r, "p_raw": p}, values=Y, afq_data=Y, afq_y=x)
+
+
+def _glm_design(data: UnitData, kind: str) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    """Design matrices of the GLM: full model X (confounds + variable terms), reduced
+    model Z (confounds only), and the names of the variable terms in X."""
+    Z = pd.DataFrame(data.confounds, columns=[f"conf{i}" for i in range(data.confounds.shape[1])])
+    Z.insert(0, "const", 1.0)
+    if kind == "group":
+        # Dummy coding, level 0 = reference
+        terms = pd.DataFrame(np.eye(len(data.levels))[data.x][:, 1:],
+                             columns=[f"x_{_level_label(level)}" for level in data.levels[1:]])
+    else:
+        terms = pd.DataFrame({"x": data.x})
+    return pd.concat([Z, terms], axis=1), Z, list(terms.columns)
+
+
+class VectorizedGLM:
+    """
+    OLS of every column of Y on a fixed design X, vectorized over the columns, with
+    the same tests as glm_test (statsmodels): t-test of a single term, Wald F-test of
+    several terms, with classical or HC0-HC3 standard errors. Used for the permutations.
+    """
+
+    def __init__(self, X: np.ndarray, term_idx: List[int], cov_type: str):
+        self.X = X
+        self.pinv = np.linalg.pinv(X)
+        self.term_idx = term_idx
+        self.cov_type = cov_type
+        self.n = len(X)
+        self.dof = self.n - np.linalg.matrix_rank(X)
+        self.leverage = np.einsum("ij,ji->i", X, self.pinv)
+
+    def pvalues(self, Y: np.ndarray) -> np.ndarray:
+        beta = self.pinv @ Y
+        resid = Y - self.X @ beta
+        A = self.pinv[self.term_idx]                            # (n_terms, n): beta_terms = A @ Y
+        b = beta[self.term_idx].T                               # (n_points, n_terms)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if self.cov_type == "nonrobust":
+                sigma2 = (resid ** 2).sum(axis=0) / self.dof
+                cov = (A @ A.T)[None] * sigma2[:, None, None]
+            else:
+                w = resid ** 2
+                if self.cov_type == "HC1":
+                    w = w * self.n / self.dof
+                elif self.cov_type == "HC2":
+                    w = w / (1 - self.leverage)[:, None]
+                elif self.cov_type == "HC3":
+                    w = w / ((1 - self.leverage) ** 2)[:, None]
+                cov = np.einsum("ki,ij,li->jkl", A, w, A)       # (n_points, n_terms, n_terms)
+            if len(self.term_idx) == 1:
+                t = b[:, 0] / np.sqrt(cov[:, 0, 0])
+                return 2 * t_dist.sf(np.abs(t), self.dof)
+            F = np.einsum("jk,jkl,jl->j", b, np.linalg.pinv(cov), b) / len(self.term_idx)
+            return f_dist.sf(F, len(self.term_idx), self.dof)
+
+
+def _freedman_lane(X: np.ndarray, Z: np.ndarray, Y: np.ndarray, term_idx: List[int],
+                   cov_type: str) -> Callable[[np.random.Generator], np.ndarray]:
+    """p-values of one Freedman-Lane permutation: the residuals of the reduced model Z
+    (confounds only) are permuted and added back to its fitted values, then the full
+    model X is tested."""
+    glm = VectorizedGLM(X, term_idx, cov_type)
+    fitted = Z @ (np.linalg.pinv(Z) @ Y)
+    resid = Y - fitted
+    return lambda rng: glm.pvalues(fitted + resid[rng.permutation(len(Y))])
 
 
 def glm_test(data: UnitData, kind: str, settings: Settings) -> Optional[PointwiseTest]:
     """
-    General linear model at each point, metric ~ 1 + variable terms + confounds,
-    with a partial F-test of the variable terms against the confounds-only model.
-    Permutations: Freedman-Lane (residuals of the confounds-only model).
+    OLS fitted with statsmodels at each point, metric ~ 1 + confounds + variable terms.
+
+    - group: ANCOVA with robust standard errors (ANCOVA_COV_TYPE, HC3 by default):
+      t-test of the adjusted difference (2 groups) or Wald F-test of the group terms;
+    - corr: classical OLS, t-test of the slope; r is the partial correlation.
+
+    Permutations: Freedman-Lane, with the same test.
     """
-    n = len(data.x)
-    Z = np.column_stack([np.ones(n), data.confounds])          # confounds-only model
-    if kind == "group":
-        terms = np.eye(len(data.levels))[data.x][:, 1:]        # dummy coding, level 0 = reference
-    else:
-        terms = data.x[:, None]
-    X = np.column_stack([Z, terms])                            # full model
-    rank_x = np.linalg.matrix_rank(X)
-    n_terms = rank_x - np.linalg.matrix_rank(Z)                # numerator degrees of freedom
-    dof = n - rank_x                                           # residual degrees of freedom
-    if n_terms < 1 or dof < 1:
+    X, Z, terms = _glm_design(data, kind)
+    if (np.linalg.matrix_rank(X) - np.linalg.matrix_rank(Z) < len(terms)
+            or len(X) - np.linalg.matrix_rank(X) < 1):
         return None  # variable collinear with the confounds, or too few subjects
+    cov_type = settings.ancova_cov_type if kind == "group" else "nonrobust"
+    contrast = np.zeros((len(terms), X.shape[1]))              # selects the variable terms
+    for i, term in enumerate(terms):
+        contrast[i, X.columns.get_loc(term)] = 1.0
 
-    pinv_x, pinv_z = np.linalg.pinv(X), np.linalg.pinv(Z)
+    n_points = data.Y.shape[1]
+    beta, se, t, p = (np.full(n_points, np.nan) for _ in range(4))
+    conf_cols = list(Z.columns[1:])
+    conf_beta = np.zeros((len(conf_cols), n_points))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # constant profiles -> NaN
+        for j in range(n_points):
+            fit = sm.OLS(data.Y[:, j], X).fit(cov_type=cov_type, use_t=True)
+            conf_beta[:, j] = fit.params[conf_cols]
+            if len(terms) == 1:
+                term = terms[0]
+                beta[j], se[j], t[j], p[j] = (fit.params[term], fit.bse[term],
+                                              fit.tvalues[term], fit.pvalues[term])
+            else:
+                wald = fit.wald_test(contrast, use_f=True, scalar=True)
+                t[j], p[j] = float(wald.statistic), float(wald.pvalue)  # F statistic
+    dof = fit.df_resid
 
-    def f_test(Y):
-        ssr_full = ((Y - X @ (pinv_x @ Y)) ** 2).sum(axis=0)
-        ssr_red = ((Y - Z @ (pinv_z @ Y)) ** 2).sum(axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            F = ((ssr_red - ssr_full) / n_terms) / (ssr_full / dof)
-            r2_partial = (ssr_red - ssr_full) / ssr_red
-        return F, f_dist.sf(F, n_terms, dof), r2_partial
-
-    F, p, r2_partial = f_test(data.Y)
-    beta = (pinv_x @ data.Y)[Z.shape[1]]                       # first variable term
-    fitted_z = Z @ (pinv_z @ data.Y)
-    resid_z = data.Y - fitted_z
-
-    def permuted_pvalues(perm):
-        return f_test(fitted_z + resid_z[perm])[1]
-
-    with np.errstate(invalid="ignore"):
-        t = np.sign(beta) * np.sqrt(F)                         # t of the slope when n_terms == 1
     if kind == "group":
-        if len(data.levels) == 2:
+        if len(terms) == 1:
             # diff = adjusted mean of group 1 - group 0; stat follows the sign
             # convention of ttest_ind(group 0, group 1) used by the residualize model
-            stats = {"p_raw": p, "diff": beta, "stat": -t, "r2_partial": r2_partial}
+            stats = {"p_raw": p, "diff": beta, "diff_se": se, "stat": -t}
         else:
-            stats = {"p_raw": p, "diff": np.full_like(p, np.nan), "stat": F, "r2_partial": r2_partial}
+            stats = {"p_raw": p, "diff": np.full(n_points, np.nan), "stat": t}
     else:
-        r = np.sign(beta) * np.sqrt(np.clip(r2_partial, 0, 1))  # partial correlation
+        with np.errstate(invalid="ignore"):
+            r = t / np.sqrt(t ** 2 + dof)                      # partial correlation
         stats = {"r": r, "p_raw": p, "beta": beta, "t": t}
-    return PointwiseTest(stats=stats, values=data.Y, permuted_pvalues=permuted_pvalues)
+    # Adjusted values: confounds set to their mean using the full-model coefficients,
+    # so the group difference of the adjusted means is the tested one
+    C = data.confounds
+    values = data.Y - (C - C.mean(axis=0)) @ conf_beta
+    afq_data, afq_y = _afq_inputs(data, kind, settings)
+    permuted_pvalues = _freedman_lane(X.to_numpy(dtype=float), Z.to_numpy(dtype=float), data.Y,
+                                      [X.columns.get_loc(term) for term in terms], cov_type)
+    return PointwiseTest(stats=stats, values=values, afq_data=afq_data, afq_y=afq_y,
+                         permuted_pvalues=permuted_pvalues)
 
 
 def make_test(data: UnitData, kind: str, settings: Settings) -> Optional[PointwiseTest]:
@@ -721,14 +820,8 @@ def make_test(data: UnitData, kind: str, settings: Settings) -> Optional[Pointwi
 
 
 # ============================================================================
-# FAMILY-WISE ERROR CORRECTION
+# FAMILY-WISE ERROR CORRECTION (AFQ)
 # ============================================================================
-
-def _longest_run(mask: np.ndarray, segments: List[Tuple[int, int]]) -> int:
-    """Longest run of True values, runs not crossing segment boundaries."""
-    return max((end - start for a, b in segments for start, end in _true_runs(mask[a:b])),
-               default=0)
-
 
 def count_clusters(mask) -> int:
     """Number of contiguous runs of True values."""
@@ -743,26 +836,48 @@ def _rng(settings: Settings, key: str) -> np.random.Generator:
     return np.random.default_rng([int(settings.random_seed), zlib.crc32(key.encode())])
 
 
-def permutation_thresholds(test: PointwiseTest, n_subjects: int, segments: List[Tuple[int, int]],
-                           settings: Settings, rng: np.random.Generator) -> Tuple[float, float]:
+def _permutation_thresholds(permuted_pvalues: Callable[[np.random.Generator], np.ndarray],
+                            settings: Settings, rng: np.random.Generator) -> Tuple[float, float]:
     """
-    Permutation estimate of the FWE thresholds (same convention as AFQ):
+    (alphaFWE, clusterFWE) from the p-values of AFQ_NPERM permutations, same
+    convention as AFQ_MultiCompCorrection:
 
     - alphaFWE: alpha-quantile of the min p-value over the points;
-    - clusterFWE: (1 - alpha)-quantile of the longest run of points with p < alpha.
+    - clusterFWE: (1 - alpha)-quantile of the longest run of points with p < alpha,
+      plus one, i.e. the minimum length of a significant run (strictly longer than
+      the null quantile, valid despite the ties of the discrete run lengths).
     """
     nperm = settings.nperm
-    if nperm < 1:
-        return np.nan, np.nan
     p_min = np.full(nperm, np.nan)
     cluster_max = np.zeros(nperm)
     for i in range(nperm):
-        p = test.permuted_pvalues(rng.permutation(n_subjects))
+        p = permuted_pvalues(rng)
         if np.isfinite(p).any():
             p_min[i] = np.nanmin(p)
-        cluster_max[i] = _longest_run(p < settings.alpha, segments)
+        cluster_max[i] = max((end - start for start, end in _true_runs(p < settings.alpha)),
+                             default=0)
     k = min(int(round(settings.alpha * nperm)), nperm - 1)
-    return float(np.sort(p_min)[k]), float(np.sort(cluster_max)[::-1][k])
+    return float(np.sort(p_min)[k]), float(np.sort(cluster_max)[::-1][k]) + 1
+
+
+def fwe_thresholds(test: PointwiseTest, kind: str, n_groups: int, settings: Settings,
+                   rng: np.random.Generator) -> Tuple[float, float]:
+    """(alphaFWE, clusterFWE): Freedman-Lane permutations of the test for the GLM,
+    else AFQ_MultiCompCorrection on the metric and variable with the confounds
+    regressed out (one-way ANOVA with more than 2 groups, not handled by AFQ)."""
+    if settings.nperm < 1:
+        return np.nan, np.nan
+    if test.permuted_pvalues is not None:
+        return _permutation_thresholds(test.permuted_pvalues, settings, rng)
+    if kind == "group" and n_groups > 2:
+        Y, codes = test.afq_data, test.afq_y
+        return _permutation_thresholds(
+            lambda rng: _group_test(Y, rng.permutation(codes), n_groups).pvalue, settings, rng)
+    with warnings.catch_warnings(), np.errstate(all="ignore"):
+        warnings.simplefilter("ignore")
+        alpha_fwe, _, cluster_fwe, _ = AFQ_MultiCompCorrection(
+            test.afq_data, test.afq_y, settings.alpha, nperm=settings.nperm, rng=rng)
+    return float(alpha_fwe), float(cluster_fwe)
 
 
 def significance_mask(p: np.ndarray, alpha_fwe: float, cluster_fwe: float,
@@ -794,8 +909,8 @@ def run_pointwise_analysis(data: UnitData, kind: str, settings: Settings,
                            thresholds: Optional[Tuple[float, float]], rng_key: str
                            ) -> Optional[Tuple[pd.DataFrame, PointwiseTest]]:
     """
-    Pointwise test + FWE correction. `thresholds` are (alphaFWE, clusterFWE)
-    computed beforehand (multi-tract), else estimated here by permutations.
+    Pointwise test + AFQ correction. `thresholds` are (alphaFWE, clusterFWE)
+    computed beforehand (multi-tract), else computed here.
 
     Result columns: point, the test statistics (group: p_raw, diff, stat, ...;
     corr: r, p_raw, n, ...), sig_afq, alphaFWE, clusterFWE, and for groups
@@ -805,8 +920,7 @@ def run_pointwise_analysis(data: UnitData, kind: str, settings: Settings,
     if test is None:
         return None
     if thresholds is None:
-        thresholds = permutation_thresholds(test, len(data.x), data.segments, settings,
-                                            _rng(settings, rng_key))
+        thresholds = fwe_thresholds(test, kind, len(data.levels), settings, _rng(settings, rng_key))
     alpha_fwe, cluster_fwe = thresholds
 
     res = pd.DataFrame({"point": data.points, **test.stats})
@@ -897,7 +1011,8 @@ def save_group_figure(data, values, res, var, metric_col, label, out_png, settin
         ax.plot(data.points, mean, label=f"{var}={level} (n={len(group_values)})")
         ax.fill_between(data.points, mean - ci, mean + ci, alpha=0.2)
     _shade_clusters(ax, data.points, res["sig_afq"].to_numpy())
-    ax.set_ylabel(metric_col if settings.stat_model == "glm" else f"{metric_col} (confound-corrected)")
+    ax.set_ylabel(f"{metric_col} (confound-adjusted)" if settings.stat_model == "glm"
+                  else f"{metric_col} (confound-corrected)")
     ax2 = _plot_pvalues(ax, res, settings)
     title = f"{label} - {metric_col} - {var} ({settings.model_label}, {settings.fwe_method})"
     _finish_figure(fig, ax, ax2, title, out_png, removed_subjects, removed_points)
@@ -1077,12 +1192,10 @@ def stack_bundles(bundle_data: Dict[str, pd.DataFrame], kind: str, var: str, con
     if not pivots:
         return None
 
-    bounds = np.cumsum([0] + [p.shape[1] for p in pivots])
     pivot = pd.concat(pivots, axis=1)
     pivot = pivot.fillna(pivot.mean())
     meta = pd.concat(metas).groupby(level=0).first().reindex(pivot.index)
-    return build_unit_data(pivot, meta, var, confounds, kind,
-                           segments=list(zip(bounds[:-1], bounds[1:])))
+    return build_unit_data(pivot, meta, var, confounds, kind)
 
 
 def multi_tract_thresholds(data: UnitData, kind: str, settings: Settings,
@@ -1090,8 +1203,7 @@ def multi_tract_thresholds(data: UnitData, kind: str, settings: Settings,
     test = make_test(data, kind, settings)
     if test is None:
         return np.nan, np.nan
-    return permutation_thresholds(test, len(data.x), data.segments, settings,
-                                  _rng(settings, rng_key))
+    return fwe_thresholds(test, kind, len(data.levels), settings, _rng(settings, rng_key))
 
 
 # ============================================================================
@@ -1143,7 +1255,7 @@ def generate_report(settings: Settings, csv_files: list, bundle_names: List[str]
     5. Save the summary CSV and the list of removed participants.
     """
     os.makedirs(report_dir, exist_ok=True)
-    print(f"Statistical model: {settings.stat_model}")
+    print(f"Statistical model: {settings.model_label}")
     if settings.stat_model == "glm" and settings.correlation_test != "pearson":
         print(f"[NOTE] CORRELATION_TEST='{settings.correlation_test}' is ignored by the GLM model")
     print(f"FWE correction: {settings.fwe_method} (alpha={settings.alpha}, {settings.nperm} permutations)")

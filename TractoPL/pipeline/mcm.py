@@ -114,6 +114,14 @@ def mcm_to_bundleseg_tracts(subject, pipeline, bundle_name,bundle_pipeline='bund
 
     bundle_list = _bundle_names(subject, bundle_name, bundle_pipeline)
 
+    if overwrite:
+        # Also drops the bundles missing from the new segmentation, and leaves nothing
+        # outdated behind a bundle whose projection fails
+        for output in subject.get(suffix='tracto', pipeline=pipeline):
+            output_bundle = output.get_full_entities().get('bundle')
+            if output_bundle and (bundle_name == 'ALL' or output_bundle in bundle_list):
+                os.remove(output.bids_path)
+
     already_done = subject.get(suffix='tracto',
                                pipeline=pipeline, extension='vtk')
     if len(already_done) > 0 and not overwrite:
@@ -493,6 +501,7 @@ def process_mcm_pipeline(
     pipeline_list=None,
     estimation_options=None,
     bundle_pipeline='bundle_seg',
+    overwrite=False,
 ):
     """
     Process the MSMT-CSD pipeline on the given subject.
@@ -539,7 +548,7 @@ def process_mcm_pipeline(
             subject,
             pipeline,
             bundle_name='ALL',
-            overwrite=False,
+            overwrite=overwrite,
             bundle_pipeline=bundle_pipeline,
         ),
         'mcm_to_bundleseg_tracts_full': lambda: mcm_to_bundleseg_tracts_full(subject, pipeline, bundle_name='ALL',overwrite=True),
@@ -564,6 +573,7 @@ def process_subject(
     pipeline_list=None,
     estimation_options=None,
     bundle_pipeline='bundle_seg',
+    overwrite=False,
 ):
     """
     Process a single subject - worker function for multiprocessing.
@@ -594,6 +604,7 @@ def process_subject(
             pipeline_list=pipeline_list,
             estimation_options=estimation_options,
             bundle_pipeline=bundle_pipeline,
+            overwrite=overwrite,
         )
     except Exception as e:
         print(f"Error processing subject {sub}: {e}")
@@ -620,9 +631,10 @@ def process_subject(
 @click.option('--ml-mode', type=click.IntRange(0, 2), default=2, show_default=True, help='Anima maximum-likelihood fitting mode.')
 @click.option('--optimizer', type=click.Choice(['levenberg', 'bobyqa', 'ccsaq', 'bfgs']), default='levenberg', show_default=True, help='Anima optimizer name.')
 @click.option('--n-threads', type=click.IntRange(1), default=None, help='Number of Anima threads (default: all cores).')
+@click.option('--overwrite', is_flag=True, help='Projection: delete the existing bundle outputs of this pipeline and recompute them.')
 def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_model,
     free_water, restricted_water, stanisz, stationary_water, model_selection, ml_mode,
-    optimizer, n_threads):
+    optimizer, n_threads, overwrite):
     """
     Command-line interface for processing a single subject.
     """
@@ -655,6 +667,7 @@ def cli(step, subject, db_root, pipeline, bundle_pipeline, n_comparts, tensor_mo
         pipeline_list=pipeline_list,
         estimation_options=estimation_options,
         bundle_pipeline=bundle_pipeline,
+        overwrite=overwrite,
     ) is None:
         sys.exit(1)
 

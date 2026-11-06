@@ -19,6 +19,8 @@ import json
 from tqdm import tqdm
 from time import sleep
 import argparse
+import nibabel as nib
+import shutil
 
 keep_intermediate = False
 
@@ -29,7 +31,8 @@ def parse_args():
     parser.add_argument('--subject','-s', required=True, help='Subject ID to process.')
     parser.add_argument('--db-root','-d', required=True, help='Path to the BIDS database root.')
     parser.add_argument('--keep-intermediate', action='store_true', help='Keep intermediate files.')
-    parser.add_argument('--force', action='store_true', help='Force reprocessing even if intermediate files exist.')
+    parser.add_argument('--overwrite', '--force', dest='overwrite', action='store_true',
+                        help='Redo the registration and replace the segmented bundles.')
     return parser.parse_args()
 
 def init_pipeline(subject, pipeline, **kwargs):
@@ -67,9 +70,26 @@ def segment_bundle_in_atlas_space(subject, pipeline, bundle, atlas, **kwargs):
     copy_from_dict(subject, bundle_tract, pipeline=pipeline, bundle=bundle, desc='noslr')
     return True
 
-def register_template_to_anat(subject, pipeline, atlas, **kwargs):
+def write_masked_fa(subject, output_dir):
     """
-    Register the atlas template to the subject's anatomical image.
+    Write the subject FA with the background set to zero. The noise around the brain is
+    bright in an FA map while the atlas is skull-stripped, which can pull the frontal
+    region of the atlas down to the skull base.
+    """
+    fa = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
+    mask = subject.get_unique(suffix='mask', label='brain', space='B0')
+    fa_img, mask_img = nib.load(fa.path), nib.load(mask.path)
+    if fa_img.shape[:3] != mask_img.shape[:3]:
+        raise ValueError(f'FA {fa_img.shape[:3]} and brain mask {mask_img.shape[:3]} have different grids')
+    masked = fa_img.get_fdata() * (mask_img.get_fdata() > 0)
+    output_path = os.path.join(output_dir, f'{subject.sub_id}_FA_masked.nii.gz')
+    nib.save(nib.Nifti1Image(masked, fa_img.affine, fa_img.header), output_path)
+    return output_path
+
+
+def register_template_to_anat(subject, pipeline, atlas, force=False, **kwargs):
+    """
+    Register the atlas template to the subject's brain-masked FA.
 
     Parameters
     ----------
@@ -82,21 +102,23 @@ def register_template_to_anat(subject, pipeline, atlas, **kwargs):
     """
 
     atlas_name = atlas.name
-    # Load the anatomical image
-    anat = subject.get_unique(metric='FA', pipeline='preprocessing', extension='nii.gz')
-
 
     transforms = [dict(desc='0GenericAffine', extension='mat'),
                   dict(desc='1Warp', extension='nii.gz'),
                   dict(desc='1InverseWarp', extension='nii.gz')]
-    if all(len(subject.get(pipeline='bundle_seg', suffix='xfm', **entities)) > 0 for entities in transforms):
+    if not force and all(len(subject.get(pipeline='bundle_seg', suffix='xfm', **entities)) > 0 for entities in transforms):
         print('Registration already done, skipping')
         return True
 
     # Register the atlas template to the subject's anatomical image
     # def ants_registration(moving, fixed, outprefix='registered',transform_type='affine', **kwargs):
-    print('Registering template to subject anatomical image', anat.path)
-    res_dict=ants_registration(str(atlas.reference), anat.path, outprefix='to_anat', moving_space=atlas_name, fixed_space='subject', transform_type='synquick', **kwargs)
+    temp_dir = tempfile.mkdtemp()
+    try:
+        anat = write_masked_fa(subject, temp_dir)
+        print('Registering template to subject anatomical image', anat)
+        res_dict=ants_registration(str(atlas.reference), anat, outprefix='to_anat', moving_space=atlas_name, fixed_space='subject', transform_type='synquick', **kwargs)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     # The Warped image has no suffix: tag it as anat if kept, otherwise drop it
     warped = [k for k,v in res_dict.items() if v.get('desc','') == 'Warped']
@@ -139,7 +161,7 @@ def _apply_trans_to_atlas_bundle(subject,pipeline,model_bundle_path,model_ref_im
     call(cmd, shell=True)
     return output_path
 
-def apply_trans_to_HCP_bundles(subject, pipeline, atlas, **kwargs):
+def apply_trans_to_HCP_bundles(subject, pipeline, atlas, force=False, **kwargs):
     """
     Apply the transformation matrix to the HCP bundles using apply_trans_to_vtk.py
 
@@ -172,7 +194,7 @@ def apply_trans_to_HCP_bundles(subject, pipeline, atlas, **kwargs):
 
     for bundle_path in tqdm(hcp_bundles, desc="Transforming HCP bundles"):
         res_dict = {}
-        if len(subject.get(pipeline='bundle_seg', bundle=bundle_path.split('summed_')[-1].split('.'+f_type)[0].replace('_',''), datatype='atlas', space='subject', atlas=moving_space,suffix='tracto'))>0:
+        if not force and len(subject.get(pipeline='bundle_seg', bundle=bundle_path.split('summed_')[-1].split('.'+f_type)[0].replace('_',''), datatype='atlas', space='subject', atlas=moving_space,suffix='tracto'))>0:
             print(f'Bundle {bundle_path} already exists, skipping')
             continue
         bundle_name = bundle_path.split('summed_')[-1].split('.'+f_type)[0]
@@ -250,7 +272,7 @@ from multiprocessing.pool import ThreadPool
 
 def generate_cluster_and_apply_transformation(subject, atlas, pipeline='bundle_seg',
                                               clustering_method="centroid", **kwargs):
-    out_dir = kwargs.get('out_dir', tempfile.mkdtemp())
+    out_dir = kwargs.get('out_dir') or tempfile.mkdtemp()
 
     moving_space = atlas.name
     inv_warp = subject.get_unique(suffix='xfm', pipeline='bundle_seg', desc='1InverseWarp', extension='nii.gz')
@@ -272,7 +294,9 @@ def generate_cluster_and_apply_transformation(subject, atlas, pipeline='bundle_s
             cmd = (f"tractopl-generate-centroid --out-dir {out_dir} "
                    f"--longest-frac {longest_frac} --resample-points {resample_points} {b_path}")
             call(cmd, shell=True)
-            centroid_path = glob(os.path.join(out_dir, f"*{hcp_name}*centroids.vtk"))[0]
+            # Named after the atlas bundle: a glob on hcp_name also matches ST_* for T_*
+            stem = os.path.splitext(os.path.basename(b_path))[0]
+            centroid_path = os.path.join(out_dir, f"{stem}_centroids.vtk")
         else:
             raise NotImplementedError(f"Unsupported clustering_method: {clustering_method}")
 
@@ -291,32 +315,37 @@ def generate_cluster_and_apply_transformation(subject, atlas, pipeline='bundle_s
         call(cmd, shell=True)
         return {output_path: output_entities}
 
-    # One pool, all bundles submitted, real parallelism
-    with ThreadPool(processes=os.cpu_count() // 2) as pool:
-        results = pool.starmap(_do_bundle, atlas.bundle_mapping.items())
+    try:
+        # One pool, all bundles submitted, real parallelism
+        with ThreadPool(processes=os.cpu_count() // 2) as pool:
+            results = pool.starmap(_do_bundle, atlas.bundle_mapping.items())
 
-    # Single-threaded merge + copy (avoids racing on `subject`)
-    res_dict = {}
-    for r in results:
-        res_dict.update(r)
-    copy_from_dict(subject, res_dict, pipeline="bundle_seg", remove_after_copy=False)
+        # Single-threaded merge + copy (avoids racing on `subject`)
+        res_dict = {}
+        for r in results:
+            res_dict.update(r)
+        copy_from_dict(subject, res_dict, pipeline="bundle_seg", remove_after_copy=False)
+    finally:
+        if not kwargs.get('out_dir'):
+            shutil.rmtree(out_dir, ignore_errors=True)
 
 
 
 
-def run_tractosearch_on_registered_atlas(subject, atlas, pipeline='bundle_seg', **kwargs):
+def run_tractosearch_on_registered_atlas(subject, atlas, pipeline='bundle_seg', force=False, **kwargs):
     if isinstance(subject, str):
         subject = Subject(subject)
 
     bundle2seg = atlas.bundle_mapping
-    already_done = subject.get(suffix='tracto', pipeline=pipeline, extension='trk',datatype='tracto')
-    already_done = [a.bundle for a in already_done if a.get_full_entities()['bundle'] in bundle2seg.keys()]
+    existing = subject.get(suffix='tracto', pipeline=pipeline, extension='trk',datatype='tracto')
+    existing = [a for a in existing if a.get_full_entities()['bundle'] in bundle2seg.keys()]
+    already_done = [] if force else [a.bundle for a in existing]
     bundle2seg = {k:v for k, v in bundle2seg.items() if k not in already_done}
     if len(bundle2seg) == 0:
         print('All bundles already done, skipping')
         return True
     anat_subject=subject.get_unique(pipeline='preprocessing', metric='FA', extension='nii.gz')
-    model_bundles = subject.get(pipeline=pipeline, suffix='tracto', atlas=atlas.name, extension='trk',datatype='atlas',bundle=list(bundle2seg.keys()))
+    model_bundles = [] if force else subject.get(pipeline=pipeline, suffix='tracto', atlas=atlas.name, extension='trk',datatype='atlas',bundle=list(bundle2seg.keys()))
 
     if len(model_bundles) != 0:
         bundle2reg = {k:v for k, v in bundle2seg.items() if k not in [m.bundle for m in model_bundles]}
@@ -352,6 +381,10 @@ def run_tractosearch_on_registered_atlas(subject, atlas, pipeline='bundle_seg', 
 
     tracto = subject.get_unique(suffix='tracto', pipeline='msmt_csd', label='brain',algo='ifod2',extension='tck')
     res_dict=process_tractosearch(tracto, model_dict, radius=8.0, in_nii=anat_subject.path,ref_nii=anat_subject.path)
+    if force:
+        # A bundle found earlier but not now has no new file to replace the old one
+        for old_bundle in existing:
+            os.remove(old_bundle.bids_path)
     copy_from_dict(subject,res_dict,pipeline=pipeline, remove_after_copy=False)
     
 
@@ -762,7 +795,7 @@ def list_missing_bundleseg(dataset, pipeline):
 
     return missing_bundles
 
-def segment_subject_bundleseg(subject, atlas, pipeline='recobundle_segmentation',pipeline_list=None, **kwargs):
+def segment_subject_bundleseg(subject, atlas, pipeline='recobundle_segmentation',pipeline_list=None, force=False, **kwargs):
     """
     Process the MSMT-CSD pipeline on the given subject.
 
@@ -800,11 +833,11 @@ def segment_subject_bundleseg(subject, atlas, pipeline='recobundle_segmentation'
     # Process each requested pipeline step
     step_mapping = {
         'init': lambda: init_pipeline(subject, pipeline),
-        'register_template_to_anat': lambda: register_template_to_anat(subject, pipeline, atlas, **kwargs),
-        'apply_trans_to_HCP_bundles': lambda: apply_trans_to_HCP_bundles(subject, pipeline, atlas, **kwargs),
+        'register_template_to_anat': lambda: register_template_to_anat(subject, pipeline, atlas, force=force, **kwargs),
+        'apply_trans_to_HCP_bundles': lambda: apply_trans_to_HCP_bundles(subject, pipeline, atlas, force=force, **kwargs),
         'apply_trans_to_HCP_clusters': lambda: apply_trans_to_HCP_clusters(subject, pipeline, atlas, **kwargs),
         'move_fa_to_template_space': lambda: move_fa_to_template_space(subject, pipeline, atlas, **kwargs),
-        'run_tractosearch_on_registered_atlas': lambda: run_tractosearch_on_registered_atlas(subject, atlas, pipeline, **kwargs),
+        'run_tractosearch_on_registered_atlas': lambda: run_tractosearch_on_registered_atlas(subject, atlas, pipeline, force=force, **kwargs),
         'get_hcp_endings': lambda: get_hcp_endings(subject, pipeline, **kwargs),
         'get_hcp_bundle_masks': lambda: get_hcp_bundle_masks(subject, pipeline, bundle_names='ALL', **kwargs),
         'get_subject_bundle_masks': lambda: get_subject_bundle_masks(subject, pipeline, bundle_names='ALL', **kwargs),
@@ -829,11 +862,11 @@ def process_single_subject(arg):
     """Process a single subject with the given arguments"""
 
     try :
-        sub, dataset_path, pipeline, pipeline_list, atlas = arg
+        sub, dataset_path, pipeline, pipeline_list, atlas, force = arg
         print(f"Processing subject {sub} with pipeline {pipeline}")
         ds=Dataset(dataset_path)
         # subject = Subject(sub, db_root=dataset_path)
-        return segment_subject_bundleseg(ds.get_subject(sub), atlas=atlas, pipeline=pipeline,pipeline_list=pipeline_list)
+        return segment_subject_bundleseg(ds.get_subject(sub), atlas=atlas, pipeline=pipeline,pipeline_list=pipeline_list, force=force)
     except Exception as e:
         print(f"Error processing subject {sub}: {e}")
         print(f"Full traceback:\n{traceback.format_exc()}")
@@ -860,7 +893,7 @@ def main():
             pipeline_list.append('generate_cluster_and_apply_transformation')
             
  
-    if not process_single_subject((args.subject, dataset_path, pipeline_name, pipeline_list, atlas)):
+    if not process_single_subject((args.subject, dataset_path, pipeline_name, pipeline_list, atlas, args.overwrite)):
         sys.exit(1)
 
 

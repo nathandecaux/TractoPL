@@ -83,7 +83,7 @@ def ants_registration(moving, fixed, outprefix='registered',transform_type='affi
     #Add the suffix of the keys in the output_pattern as a desc entity
     output_pattern = {k: upt_dict(v, {"desc": k.split(outprefix)[1].split('.')[0],"trans":transform_type}) for k, v in output_pattern.items()}
 
-    main_cmd= "antsRegistrationSyN.sh" if 'quick' in transform_type.lower() else "antsRegistrationSyN.sh"
+    main_cmd= "antsRegistrationSyNQuick.sh" if 'quick' in transform_type.lower() else "antsRegistrationSyN.sh"
     # Run the command
     res_dict =  run_cli_command(
         main_cmd,

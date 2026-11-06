@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "corr_variables": {},            # e.g. {"score": {"confounds": ["age"]}}
     "test_by_group": None,
     "STAT_MODEL": "residualize",     # residualize | glm
+    "ANCOVA_COV_TYPE": "HC3",        # glm model, group variables: HC3 | HC2 | HC1 | HC0 | nonrobust
     "COMBAT_BATCH": None,            # site column harmonized with ComBat (None = off)
     "COMBAT_EB": True,
     "COMBAT_MEAN_ONLY": False,
@@ -64,6 +65,7 @@ STAT_MODELS = {
     "residualize": "Residualization + t-test / ANOVA / correlation",
     "glm": "GLM (pointwise general linear model)",
 }
+ANCOVA_COV_TYPES = ["HC3", "HC2", "HC1", "HC0", "nonrobust"]
 FWE_METHODS = ["clusterFWE", "alphaFWE", "mixed"]
 CORRELATION_TESTS = ["pearson", "spearman"]
 METRIC_CHOICES = ["FA", "IFW",'IRF']
@@ -145,6 +147,7 @@ def push_config_to_widgets(cfg):
 
     ss["test_by_group"] = cfg.get("test_by_group") or NO_GROUP
     ss["stat_model"] = cfg.get("STAT_MODEL") or "residualize"
+    ss["ancova_cov_type"] = cfg.get("ANCOVA_COV_TYPE") or "HC3"
     ss["combat_batch"] = cfg.get("COMBAT_BATCH") or NO_GROUP
     ss["combat_eb"] = bool(cfg.get("COMBAT_EB", True))
     ss["combat_mean_only"] = bool(cfg.get("COMBAT_MEAN_ONLY", False))
@@ -590,6 +593,7 @@ def build_config() -> dict:
     cfg["test_by_group"] = None if tb in (None, "", NO_GROUP) else tb
 
     cfg["STAT_MODEL"] = ss.get("stat_model", "residualize")
+    cfg["ANCOVA_COV_TYPE"] = ss.get("ancova_cov_type", "HC3")
     batch = str(ss.get("combat_batch") or "").strip()
     cfg["COMBAT_BATCH"] = None if batch in ("", NO_GROUP) else batch
     cfg["COMBAT_EB"] = bool(ss.get("combat_eb", True))
@@ -848,10 +852,14 @@ with tab_vars:
              horizontal=True, label_visibility="collapsed")
     glm = st.session_state.get("stat_model") == "glm"
     if glm:
-        st.caption("At each point: `metric ~ 1 + variable + confounds` (categorical variables and "
-                   "confounds dummy-coded). The variable is tested with a partial F-test (t-test of "
-                   "the slope for a single term); for correlations, r is the partial correlation. "
-                   "FWE permutations follow the Freedman-Lane scheme.")
+        st.selectbox("Group ANCOVA standard errors (statsmodels cov_type)", ANCOVA_COV_TYPES,
+                     key="ancova_cov_type",
+                     help="HC3: robust to unequal group sizes and variances (Welch-like). "
+                          "nonrobust: classical ANCOVA.")
+        st.caption("At each point, OLS `metric ~ 1 + variable + confounds` (statsmodels; "
+                   "categorical variables and confounds dummy-coded). Groups: ANCOVA with robust "
+                   "standard errors, t-test of the adjusted difference. Correlations: t-test of the "
+                   "slope, r = partial correlation. FWE: AFQ correction on the confound-corrected data.")
     else:
         st.caption("At each point the confounds are regressed out by OLS, then a Welch t-test "
                    "(2 groups), an ANOVA (> 2 groups) or a correlation is computed on the residuals.")

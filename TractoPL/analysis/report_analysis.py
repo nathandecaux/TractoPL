@@ -11,6 +11,8 @@ pn.extension('tabulator')
 
 parser = argparse.ArgumentParser(description="ActiDep - Résultats hors actimétrie")
 parser.add_argument("filepath", nargs='?', default=None, help="Chemin vers summary_results.csv")
+parser.add_argument("--port", type=int, default=6767, help="Premier port essayé (incrémenté s'il est pris)")
+parser.add_argument("--no-browser", action="store_true", help="Ne pas ouvrir de navigateur")
 args = parser.parse_args()
 CSV_PATH = args.filepath
 print(CSV_PATH)
@@ -520,7 +522,7 @@ def main():
         #Check port 6767, if already in use, choose, increase
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    port = 6767
+    port = args.port
     while True:
         try:
             sock.bind(("0.0.0.0", port))
@@ -532,7 +534,7 @@ def main():
 
     #Open is false if this is starting from an ssh session
     import os
-    if os.environ.get("SSH_CONNECTION"):
+    if os.environ.get("SSH_CONNECTION") or args.no_browser:
         open_browser = False
     else:
         open_browser = True

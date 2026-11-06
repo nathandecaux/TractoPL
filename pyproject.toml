@@ -33,6 +33,8 @@ pytest = "*"
 plotly = "*"
 statsmodels = "*"
 streamlit = "*"
+panel = "*"
+hvplot = "*"
 
 [tool.poetry.scripts]
 tractopl-apply-trans-to-vtk = "TractoPL.scripts.apply_trans_to_vtk:main"
@@ -49,6 +51,11 @@ tractopl-connectome = "TractoPL.pipeline.connectome:cli"
 tractopl-quickbundle="TractoPL.scripts.quickbundle:main"
 tractosearch_nearest_in_radius = "TractoPL.scripts.tractosearch_nearest_in_radius:main"
 tractopl-report-analysis = "TractoPL.analysis.report_analysis:main"
+tractopl-gui = "TractoPL.dashboard.apps:home"
+tractopl-gui-pipeline = "TractoPL.dashboard.apps:pipeline"
+tractopl-gui-analysis = "TractoPL.dashboard.apps:analysis"
+tractopl-gui-dashboard = "TractoPL.dashboard.apps:dashboard"
+tractopl-gui-report = "TractoPL.dashboard.apps:report"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

@@ -116,11 +116,22 @@ The launcher mounts the checkout at `/opt/tractopl`, sets `PYTHONPATH=/opt/tract
 
 ## Quick start
 
-Use the workflow launcher using streamlit : 
+Install the web applications (`pip install -e '.[dashboard]'`) and open their home page:
 
 ```Shell
-streamlit run streamlit_launcher.py
+tractopl-gui
 ```
+
+| Command                    | Application                                                         |
+| -------------------------- | ------------------------------------------------------------------- |
+| `tractopl-gui`           | Home page: starts any of the applications below and links to them. |
+| `tractopl-gui-pipeline`  | Workflow launcher (`dashboard/streamlit_launcher.py`).             |
+| `tractopl-gui-analysis`  | Population analysis configuration and run (`analysis/streamlit_analysis.py`). |
+| `tractopl-gui-dashboard` | Tractometry dashboard (`dashboard/streamlit_dashboard.py`).        |
+| `tractopl-gui-report`    | Results browser for `summary_results.csv` (`analysis/report_analysis.py`). |
+
+Each command accepts `--port` and `--no-browser`; other arguments go to the
+application (Streamlit options, or the CSV path for `tractopl-gui-report`).
 
 It detects your dataset, retrieve the right files for each individual subjects, let you run the workflow step by step, and gives you a feedback on the success of the pipeline. 
 
@@ -167,7 +178,7 @@ A Streamlit page builds and runs the commands above from the browser:
 
 ```shell
 pip install '.[dashboard]'
-streamlit run TractoPL/dashboard/streamlit_launcher.py
+tractopl-gui-pipeline
 ```
 
 Enter the BIDS root and atlas manifest in the sidebar. The launcher indexes the
@@ -198,7 +209,7 @@ Install the optional dashboard dependencies and start Streamlit:
 
 ```shell
 pip install '.[dashboard]'
-streamlit run TractoPL/dashboard/streamlit_dashboard.py
+tractopl-gui-dashboard
 ```
 
 Select the BIDS root in the sidebar, or provide `TRACTOPL_DATASET_ROOT`. The dashboard identifies tractometry derivatives through the `.tag_tractometry` marker written by `tractopl-tractometry`, their BIDS `dataset_description.json`, or existing metric CSV files. This makes custom `--pipeline` names discoverable; legacy `hcp_association*` names remain recognized.
