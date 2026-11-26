@@ -15,3 +15,13 @@ TractoPL/analysis/report_template.md.jinja2
 TractoPL/analysis/streamlit_workdir
 TractoPL/dashboard/launcher_workdir
 TractoPL/dashboard/nohup.out
+
+# build outputs
+*.egg-info/
+build/
+dist/
+
+# pixi environments (pixi.lock is committed)
+.pixi/
+.agents
+.claude

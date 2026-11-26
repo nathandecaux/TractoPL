@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {
     "COMBAT_EB": True,
     "COMBAT_MEAN_ONLY": False,
     "COMBAT_PER_PERMUTATION": False,
-    "FWE_METHOD": "clusterFWE",      # clusterFWE | alphaFWE | mixed
+    "FWE_METHOD": "clusterFWE",      # clusterFWE | alphaFWE | mixed | TFCE
     "AFQ_ALPHA": 0.05,
     "AFQ_NPERM": 1000,
     "CORRECT_MULTI_TRACT": False,
@@ -66,7 +66,7 @@ STAT_MODELS = {
     "glm": "GLM (pointwise general linear model)",
 }
 ANCOVA_COV_TYPES = ["HC3", "HC2", "HC1", "HC0", "nonrobust"]
-FWE_METHODS = ["clusterFWE", "alphaFWE", "mixed"]
+FWE_METHODS = ["clusterFWE", "alphaFWE", "mixed", "TFCE"]
 CORRELATION_TESTS = ["pearson", "spearman"]
 METRIC_CHOICES = ["FA", "IFW",'IRF']
 STAT_CHOICES = ["mean"]
@@ -885,6 +885,35 @@ with tab_vars:
         st.markdown("#### Confounds (covariates in the GLM)" if glm else
                     "#### Confounds (variables regressed out by OLS before testing)")
         conf_opts = list(df_sub.columns) if df_sub is not None else None
+
+        # Same confounds for every variable (a variable is never its own confound)
+        def _apply_common_confounds(variables, as_list):
+            ss = st.session_state
+            if as_list:
+                common = list(ss.get("conf_common_sel", []) or [])
+                for var in variables:
+                    ss[f"conf::{var}"] = [c for c in common if c != var]
+            else:
+                common = [s.strip() for s in str(ss.get("conf_common_txt", "")).split(",")
+                          if s.strip()]
+                for var in variables:
+                    ss[f"conf::{var}"] = ", ".join(c for c in common if c != var)
+
+        with st.container(border=True):
+            st.caption("Common confounds: apply the same confounds to all the variables "
+                       "(each variable is automatically excluded from its own confounds).")
+            cc1, cc2 = st.columns([4, 1], vertical_alignment="bottom")
+            if conf_opts:
+                st.session_state["conf_common_sel"] = [
+                    c for c in state_as_list("conf_common_sel") if c in conf_opts]
+                cc1.multiselect("Common confounds", conf_opts, key="conf_common_sel")
+            else:
+                state_as_str("conf_common_txt")
+                cc1.text_input("Common confounds (comma-separated)", key="conf_common_txt")
+            cc2.button("Apply to all variables", key="apply_common_conf",
+                       on_click=_apply_common_confounds,
+                       args=(all_vars, bool(conf_opts)), use_container_width=True)
+
         for v in all_vars:
             with st.expander(f"Confounds — {v}"):
                 if conf_opts:

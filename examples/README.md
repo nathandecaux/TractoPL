@@ -21,8 +21,8 @@ The arguments are:
 ## Prerequisites
 
 Install TractoPL and its runtime dependencies, then make the external tools
-available through the `TRACTOPL_*` environment variables described in the root
-[README](../README.md). The workflow requires Anima, MRtrix3, ANTs, and
+available through the `TRACTOPL_*` environment variables described in the
+[installation guide](../docs/installation.md#external-tools). The workflow requires Anima, MRtrix3, ANTs, and
 TractoSearch.
 
 The input dataset must contain at least:

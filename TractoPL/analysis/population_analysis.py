@@ -32,21 +32,44 @@ available (config key "STAT_MODEL"):
 
     CORRELATION_TEST and CORRECT_METRIC_CONFOND_ONLY do not apply to the tests.
 
+RANK_TRANSFORM (both models): before the test, the metric at each point and the
+correlation variable are replaced by their normal scores, Phi^-1((rank - 0.5) / n),
+computed on the subjects of the analysis. Confounds and group labels are left as is.
+With the GLM, the slope test then approximates a partial Spearman correlation.
+
 The family-wise error along each bundle is controlled by permutations
 (AFQ_NPERM): min p-value threshold (alphaFWE), cluster size threshold
-(clusterFWE) or both (mixed), see FWE_METHOD.
+(clusterFWE), both (mixed), or Threshold-Free Cluster Enhancement (TFCE).
+The thresholds of all the methods are estimated from the same permutations
+and saved in the per-point CSVs (sig_<method> columns), so that the readers
+(population_analysis_report.py, report_analysis.py) can switch method without
+re-running the analysis; FWE_METHOD sets sig_afq / n_sig and the figures.
 
-- "residualize" model: AFQ correction (AFQ_MultiCompCorrection), computed on
-  the metric and the variable with the confounds regressed out. With more than
-  2 groups (not handled by AFQ_MultiCompCorrection) the same procedure is run
-  with a one-way ANOVA.
+- "residualize" model: AFQ-style permutations on the metric and the variable
+  with the confounds regressed out (group labels or variable shuffled, same
+  Welch t-test / one-way ANOVA / correlation as the observed one).
 - "glm" model: Freedman-Lane permutations. The residuals of the confounds-only
   model are permuted and added back to its fitted values, and the same GLM
   test as the observed one (same covariance type) is computed on each
   permuted dataset.
 
+TFCE (Smith & Nichols, 2009), 1D version along the profile: the p-values are
+converted to z-scores, z = Phi^-1(1 - p/2), signed by the direction of the
+effect for single-term tests (2 groups, correlations), unsigned for F-tests.
+At each point, for the positive and negative parts separately,
+
+    TFCE(v) = sum_h  e(h)^TFCE_E * h^TFCE_H * TFCE_DH,   h = TFCE_DH, 2 TFCE_DH, ...
+
+where e(h) is the length (in points) of the run of points with z >= h that
+contains v. The null distribution of max |TFCE| over the profile is built
+with the same permutations as the other methods (Freedman-Lane for the GLM,
+permutations of the group labels / variable on the confound-corrected data for
+the "residualize" model), giving a FWE-corrected p-value per point (p_tfce);
+a point is significant when p_tfce <= AFQ_ALPHA.
+
 With CORRECT_MULTI_TRACT the thresholds are computed once over the
-concatenated profiles of all bundles.
+concatenated profiles of all bundles; clusters (clusterFWE, mixed, TFCE) never
+span two bundles/centroids of the concatenated profiles.
 
 Categorical confounds (non-numeric columns) are dummy-coded in both models.
 
@@ -73,12 +96,12 @@ import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for server-side plotting
 import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
-from scipy.stats import f_oneway, rankdata, ttest_ind
+from scipy.stats import f_oneway, norm, rankdata, ttest_ind
 from scipy.stats import f as f_dist
 from scipy.stats import t as t_dist
 from tqdm import tqdm
 
-from TractoPL.analysis.afq_optimized import AFQ_MultiCompCorrection
+from TractoPL.analysis.fwe_utils import FWE_METHODS, n_significant, significance_mask, true_runs
 from TractoPL.data.loader import Dataset
 from TractoPL.set_config import get_HCP_bundle_names
 
@@ -108,11 +131,14 @@ DEFAULT_CONFIG = {
     "ANCOVA_COV_TYPE": "HC3",       # "glm" model, group variables: statsmodels cov_type
 
     # --- Multiple comparison correction ---
-    "FWE_METHOD": "clusterFWE",     # "clusterFWE", "alphaFWE", or "mixed"
+    "FWE_METHOD": "clusterFWE",     # "clusterFWE", "alphaFWE", "mixed" or "TFCE"
     "AFQ_ALPHA": 0.05,
     "AFQ_NPERM": 1000,
     "CORRECT_MULTI_TRACT": False,   # Thresholds computed across all bundles (slower)
     "RANDOM_SEED": None,            # Integer for reproducible permutations
+    "TFCE_E": 0.5,                  # TFCE extent exponent
+    "TFCE_H": 2.0,                  # TFCE height exponent
+    "TFCE_DH": 0.1,                 # TFCE height step (z units)
 
     # --- Data quality ---
     "MISSING_SUBJECTS_TOLERANCE": 0,    # Max subjects with a missing value per point
@@ -127,6 +153,9 @@ DEFAULT_CONFIG = {
     # --- "residualize" model only ---
     "CORRELATION_TEST": "pearson",      # "pearson" or "spearman"
     "CORRECT_METRIC_CONFOND_ONLY": False,  # Do not regress the confounds out of the variable
+
+    # --- Both models: normal scores of the metric (per point) and of the variable ---
+    "RANK_TRANSFORM": False,
 
     # --- Optional table merged by participant_id (ignored with --subjects-table) ---
     "additional_info_path": None,
@@ -143,7 +172,6 @@ DEFAULT_CONFIG = {
 
 STAT_MODELS = ("residualize", "glm")
 ANCOVA_COV_TYPES = ("HC3", "HC2", "HC1", "HC0", "nonrobust")
-FWE_METHODS = ("clusterFWE", "alphaFWE", "mixed")
 CORRELATION_TESTS = ("pearson", "spearman")
 MIN_SUBJECTS = 4
 
@@ -179,6 +207,10 @@ def validate_config(config: Dict) -> None:
         value = config.get(key) or DEFAULT_CONFIG[key]
         if value not in allowed:
             raise ValueError(f"Configuration key '{key}' must be one of {allowed}, got '{value}'")
+    for key in ("TFCE_E", "TFCE_H", "TFCE_DH"):
+        value = config.get(key)
+        if value is not None and not (isinstance(value, (int, float)) and value > 0):
+            raise ValueError(f"Configuration key '{key}' must be a positive number, got '{value}'")
 
 
 def save_config(config: Dict, output_path: str) -> None:
@@ -202,6 +234,9 @@ class Settings:
     nperm: int = 1000
     multi_tract: bool = False
     random_seed: Optional[int] = None
+    tfce_e: float = 0.5
+    tfce_h: float = 2.0
+    tfce_dh: float = 0.1
     correlation_test: str = "pearson"
     correct_metric_only: bool = False
     missing_subjects_tolerance: int = 0
@@ -212,6 +247,7 @@ class Settings:
     stat_types: Tuple[str, ...] = ("mean",)
     exclude: Dict[str, list] = field(default_factory=dict)
     save_figures: bool = False
+    rank_transform: bool = False
 
     @classmethod
     def from_config(cls, config: Dict) -> "Settings":
@@ -237,6 +273,9 @@ class Settings:
             nperm=int(get("AFQ_NPERM")),
             multi_tract=bool(get("CORRECT_MULTI_TRACT")),
             random_seed=config.get("RANDOM_SEED"),
+            tfce_e=float(get("TFCE_E")),
+            tfce_h=float(get("TFCE_H")),
+            tfce_dh=float(get("TFCE_DH")),
             correlation_test=get("CORRELATION_TEST"),
             correct_metric_only=bool(get("CORRECT_METRIC_CONFOND_ONLY")),
             missing_subjects_tolerance=int(get("MISSING_SUBJECTS_TOLERANCE")),
@@ -247,6 +286,7 @@ class Settings:
             stat_types=tuple(get("STAT_TYPES")),
             exclude=dict(config.get("EXCLUDE") or {}),
             save_figures=bool(get("SAVE_FIGURES")),
+            rank_transform=bool(get("RANK_TRANSFORM")),
         )
 
     def variables(self) -> List[Tuple[str, str, List[str]]]:
@@ -493,13 +533,6 @@ def interpolate_missing_points(long_df: pd.DataFrame, max_gap: int = 2) -> pd.Da
     return out
 
 
-def _true_runs(mask) -> List[Tuple[int, int]]:
-    """(start, end) index ranges of the runs of True values in a boolean array."""
-    padded = np.concatenate([[False], np.asarray(mask, dtype=bool), [False]])
-    edges = np.flatnonzero(np.diff(padded.astype(np.int8)))
-    return list(zip(edges[::2], edges[1::2]))
-
-
 def clean_missing_data(long_df: pd.DataFrame, tolerance: int = 0, interpolate_max_gap: int = 2,
                        keep_largest_contiguous: bool = True) -> Tuple[pd.DataFrame, list, list]:
     """
@@ -524,7 +557,7 @@ def clean_missing_data(long_df: pd.DataFrame, tolerance: int = 0, interpolate_ma
     valid = (pivot.isna().sum(axis=0) <= tolerance).to_numpy()
 
     if keep_largest_contiguous:
-        runs = _true_runs(valid)
+        runs = true_runs(valid)
         if not runs:
             return long_df.iloc[0:0].copy(), [], points.tolist()
         start, end = max(runs, key=lambda run: run[1] - run[0])  # first longest run
@@ -571,8 +604,14 @@ def encode_confounds(meta: pd.DataFrame, columns: List[str]) -> np.ndarray:
     return design[:, design.std(axis=0) > 0]
 
 
+def normal_scores(values: np.ndarray) -> np.ndarray:
+    """Normal scores Phi^-1((rank - 0.5) / n) along axis 0 (average ranks for ties)."""
+    values = np.asarray(values, dtype=float)
+    return norm.ppf((rankdata(values, axis=0) - 0.5) / len(values))
+
+
 def build_unit_data(pivot: pd.DataFrame, meta: pd.DataFrame, var: str, confounds: List[str],
-                    kind: str) -> Optional[UnitData]:
+                    kind: str, rank_transform: bool = False) -> Optional[UnitData]:
     """
     Keep the subjects with a complete profile and non-missing variable and
     confounds, and encode the variable (group codes, or numeric values).
@@ -599,9 +638,14 @@ def build_unit_data(pivot: pd.DataFrame, meta: pd.DataFrame, var: str, confounds
             return None
     else:
         x_values = x.to_numpy(dtype=float)
+        if rank_transform:
+            x_values = normal_scores(x_values)
 
+    Y = pivot.to_numpy(dtype=float)
+    if rank_transform:
+        Y = normal_scores(Y)
     return UnitData(
-        Y=pivot.to_numpy(dtype=float),
+        Y=Y,
         points=pivot.columns.to_numpy(),
         subjects=pivot.index.to_numpy(),
         x=x_values,
@@ -613,19 +657,25 @@ def build_unit_data(pivot: pd.DataFrame, meta: pd.DataFrame, var: str, confounds
 # ============================================================================
 # POINTWISE TESTS
 # ============================================================================
-# A test returns its observed statistics (one value per point) and the data the
-# AFQ correction is computed on (metric and variable with confounds removed), or
-# for the GLM a function giving the p-values of one Freedman-Lane permutation.
+# A test returns its observed statistics (one value per point) and a function
+# giving the p-values (and effect signs) of one permutation: Freedman-Lane for
+# the GLM, permutation of the group labels / variable for "residualize".
 # ============================================================================
+
+# random generator -> (p-values, effect signs or None) of one permutation
+Permutation = Callable[[np.random.Generator], Tuple[np.ndarray, Optional[np.ndarray]]]
+
 
 @dataclass
 class PointwiseTest:
     stats: Dict[str, np.ndarray]    # observed statistics per point, always with "p_raw"
     values: np.ndarray              # (n_subjects, n_points) values the group means are computed on
-    afq_data: np.ndarray            # (n_subjects, n_points) metric given to AFQ_MultiCompCorrection
-    afq_y: np.ndarray               # group codes or variable given to AFQ_MultiCompCorrection
-    # GLM only: random generator -> p-values of one permutation (replaces the AFQ correction)
-    permuted_pvalues: Optional[Callable[[np.random.Generator], np.ndarray]] = None
+    permute: Permutation            # p-values and signs of one permutation of the same test
+    sign: Optional[np.ndarray] = None   # observed effect sign (single-term tests), None for F-tests
+
+
+def _sign(stat: np.ndarray) -> np.ndarray:
+    return np.sign(np.nan_to_num(stat))
 
 
 def _residualize(Y: np.ndarray, C: np.ndarray) -> np.ndarray:
@@ -660,9 +710,10 @@ def _group_test(Y: np.ndarray, codes: np.ndarray, n_groups: int):
         return f_oneway(*groups, axis=0)
 
 
-def _afq_inputs(data: UnitData, kind: str, settings: Settings) -> Tuple[np.ndarray, np.ndarray]:
-    """Data of the AFQ correction: metric with the confounds regressed out, and group
-    codes (group) or the variable with the confounds regressed out (corr)."""
+def _residualized_inputs(data: UnitData, kind: str, settings: Settings
+                         ) -> Tuple[np.ndarray, np.ndarray]:
+    """Metric with the confounds regressed out, and group codes (group) or the variable
+    with the confounds regressed out (corr, unless CORRECT_METRIC_CONFOND_ONLY)."""
     Y = _residualize(data.Y, data.confounds)
     if kind == "group":
         return Y, data.x
@@ -671,22 +722,39 @@ def _afq_inputs(data: UnitData, kind: str, settings: Settings) -> Tuple[np.ndarr
 
 
 def residualize_test(data: UnitData, kind: str, settings: Settings) -> PointwiseTest:
-    """Confounds regressed out by OLS, then t-test/ANOVA or correlation on the residuals."""
-    Y, x = _afq_inputs(data, kind, settings)
+    """Confounds regressed out by OLS, then t-test/ANOVA or correlation on the residuals.
+    Permutations: group labels (group) or variable (corr) shuffled, same test."""
+    Y, x = _residualized_inputs(data, kind, settings)
 
     if kind == "group":
         n_groups = len(data.levels)
-        res = _group_test(Y, data.x, n_groups)
+
+        def group_test(codes):
+            res = _group_test(Y, codes, n_groups)
+            return res, (_sign(res.statistic) if n_groups == 2 else None)
+
+        res, sign = group_test(data.x)
         diff = (Y[data.x == 1].mean(axis=0) - Y[data.x == 0].mean(axis=0) if n_groups == 2
                 else np.full(Y.shape[1], np.nan))
+
+        def permute(rng):
+            res, sign = group_test(rng.permutation(data.x))
+            return res.pvalue, sign
+
         return PointwiseTest(stats={"p_raw": res.pvalue, "diff": diff, "stat": res.statistic},
-                             values=Y, afq_data=Y, afq_y=x)
+                             values=Y, permute=permute, sign=sign)
 
     if settings.correlation_test == "spearman":
-        r, p = _pearson(rankdata(x), rankdata(Y, axis=0))
+        xt, Yt = rankdata(x), rankdata(Y, axis=0)
     else:
-        r, p = _pearson(x, Y)
-    return PointwiseTest(stats={"r": r, "p_raw": p}, values=Y, afq_data=Y, afq_y=x)
+        xt, Yt = x, Y
+    r, p = _pearson(xt, Yt)
+
+    def permute(rng):
+        r, p = _pearson(rng.permutation(xt), Yt)
+        return p, _sign(r)
+
+    return PointwiseTest(stats={"r": r, "p_raw": p}, values=Y, permute=permute, sign=_sign(r))
 
 
 def _glm_design(data: UnitData, kind: str) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
@@ -719,7 +787,8 @@ class VectorizedGLM:
         self.dof = self.n - np.linalg.matrix_rank(X)
         self.leverage = np.einsum("ij,ji->i", X, self.pinv)
 
-    def pvalues(self, Y: np.ndarray) -> np.ndarray:
+    def pvalues(self, Y: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """p-values and, for a single term, sign of its coefficient."""
         beta = self.pinv @ Y
         resid = Y - self.X @ beta
         A = self.pinv[self.term_idx]                            # (n_terms, n): beta_terms = A @ Y
@@ -739,14 +808,14 @@ class VectorizedGLM:
                 cov = np.einsum("ki,ij,li->jkl", A, w, A)       # (n_points, n_terms, n_terms)
             if len(self.term_idx) == 1:
                 t = b[:, 0] / np.sqrt(cov[:, 0, 0])
-                return 2 * t_dist.sf(np.abs(t), self.dof)
+                return 2 * t_dist.sf(np.abs(t), self.dof), _sign(t)
             F = np.einsum("jk,jkl,jl->j", b, np.linalg.pinv(cov), b) / len(self.term_idx)
-            return f_dist.sf(F, len(self.term_idx), self.dof)
+            return f_dist.sf(F, len(self.term_idx), self.dof), None
 
 
 def _freedman_lane(X: np.ndarray, Z: np.ndarray, Y: np.ndarray, term_idx: List[int],
-                   cov_type: str) -> Callable[[np.random.Generator], np.ndarray]:
-    """p-values of one Freedman-Lane permutation: the residuals of the reduced model Z
+                   cov_type: str) -> Permutation:
+    """p-values (and signs) of one Freedman-Lane permutation: the residuals of the reduced model Z
     (confounds only) are permuted and added back to its fitted values, then the full
     model X is tested."""
     glm = VectorizedGLM(X, term_idx, cov_type)
@@ -807,11 +876,10 @@ def glm_test(data: UnitData, kind: str, settings: Settings) -> Optional[Pointwis
     # so the group difference of the adjusted means is the tested one
     C = data.confounds
     values = data.Y - (C - C.mean(axis=0)) @ conf_beta
-    afq_data, afq_y = _afq_inputs(data, kind, settings)
-    permuted_pvalues = _freedman_lane(X.to_numpy(dtype=float), Z.to_numpy(dtype=float), data.Y,
-                                      [X.columns.get_loc(term) for term in terms], cov_type)
-    return PointwiseTest(stats=stats, values=values, afq_data=afq_data, afq_y=afq_y,
-                         permuted_pvalues=permuted_pvalues)
+    permute = _freedman_lane(X.to_numpy(dtype=float), Z.to_numpy(dtype=float), data.Y,
+                             [X.columns.get_loc(term) for term in terms], cov_type)
+    return PointwiseTest(stats=stats, values=values, permute=permute,
+                         sign=_sign(beta) if len(terms) == 1 else None)
 
 
 def make_test(data: UnitData, kind: str, settings: Settings) -> Optional[PointwiseTest]:
@@ -820,13 +888,8 @@ def make_test(data: UnitData, kind: str, settings: Settings) -> Optional[Pointwi
 
 
 # ============================================================================
-# FAMILY-WISE ERROR CORRECTION (AFQ)
+# FAMILY-WISE ERROR CORRECTION (AFQ / TFCE)
 # ============================================================================
-
-def count_clusters(mask) -> int:
-    """Number of contiguous runs of True values."""
-    return len(_true_runs(mask))
-
 
 def _rng(settings: Settings, key: str) -> np.random.Generator:
     """Random generator of one analysis; with RANDOM_SEED it only depends on the seed and
@@ -836,100 +899,140 @@ def _rng(settings: Settings, key: str) -> np.random.Generator:
     return np.random.default_rng([int(settings.random_seed), zlib.crc32(key.encode())])
 
 
-def _permutation_thresholds(permuted_pvalues: Callable[[np.random.Generator], np.ndarray],
-                            settings: Settings, rng: np.random.Generator) -> Tuple[float, float]:
+def segment_starts(points: np.ndarray) -> Optional[np.ndarray]:
+    """Points starting a new bundle/centroid in profiles stacked by stack_bundles (their
+    points are (label, point) tuples), where TFCE clusters must not cross; None otherwise."""
+    if len(points) == 0 or not isinstance(points[0], tuple):
+        return None
+    labels = np.array([p[0] for p in points], dtype=object)
+    return np.r_[False, labels[1:] != labels[:-1]]
+
+
+def tfce(p: np.ndarray, sign: Optional[np.ndarray], settings: Settings,
+         starts: Optional[np.ndarray] = None) -> np.ndarray:
     """
-    (alphaFWE, clusterFWE) from the p-values of AFQ_NPERM permutations, same
-    convention as AFQ_MultiCompCorrection:
+    1D Threshold-Free Cluster Enhancement of a p-value profile (see module docstring).
+    The p-values are converted to z-scores, signed when `sign` is given (positive and
+    negative effects enhanced separately); the result carries the sign of the effect.
+    `starts` marks the points where a new segment starts (no cluster across them).
+    """
+    p = np.clip(np.nan_to_num(np.asarray(p, dtype=float), nan=1.0), 1e-300, 1.0)
+    z = norm.isf(p / 2)
+    if sign is not None:
+        z = z * sign
+    dh, n = settings.tfce_dh, len(z)
+    out = np.zeros(n)
+    for direction in ((1, -1) if sign is not None else (1,)):
+        zs = np.maximum(direction * z, 0.0)
+        if zs.max() < dh:
+            continue
+        heights = np.arange(1, int(zs.max() / dh + 1e-9) + 1) * dh
+        above = zs[None, :] >= heights[:, None]                         # (n_heights, n)
+        new_run = above & ~np.pad(above, ((0, 0), (1, 0)))[:, :-1]      # first point of each run
+        if starts is not None:
+            new_run |= above & starts[None, :]
+        run_id = np.cumsum(new_run.ravel()).reshape(above.shape)
+        extent = np.bincount(run_id[above], minlength=run_id.max() + 1)[run_id]
+        enhanced = np.where(above, extent.astype(float) ** settings.tfce_e, 0.0)
+        out += direction * (enhanced * (heights ** settings.tfce_h)[:, None]).sum(axis=0) * dh
+    return out
+
+
+@dataclass(frozen=True)
+class FWEThresholds:
+    """FWE thresholds of one analysis. tfce_null: sorted (descending) max |TFCE| over
+    the profile of each permutation, only computed with the TFCE method."""
+    alpha_fwe: float = np.nan
+    cluster_fwe: float = np.nan
+    tfce_null: Optional[np.ndarray] = None
+
+    def tfce_pvalues(self, tfce_values: np.ndarray) -> np.ndarray:
+        """FWE-corrected p-values: (1 + #{permutations with max|TFCE| >= |TFCE|}) / (nperm + 1)."""
+        if self.tfce_null is None or len(self.tfce_null) == 0:
+            return np.full(len(tfce_values), np.nan)
+        null = np.sort(self.tfce_null)
+        n_ge = len(null) - np.searchsorted(null, np.abs(tfce_values) - 1e-12, side="left")
+        return (1 + n_ge) / (len(null) + 1)
+
+    def tfce_fwe(self, alpha: float) -> float:
+        """Smallest |TFCE| level exceeded by the significant points (p_tfce <= alpha)."""
+        if self.tfce_null is None or len(self.tfce_null) == 0:
+            return np.nan
+        c = int(np.floor(alpha * (len(self.tfce_null) + 1) + 1e-9)) - 1
+        return float(self.tfce_null[c]) if c >= 0 else np.inf
+
+
+def fwe_thresholds(test: PointwiseTest, settings: Settings, rng: np.random.Generator,
+                   starts: Optional[np.ndarray] = None) -> FWEThresholds:
+    """
+    Thresholds of every FWE method from the same AFQ_NPERM permutations of the test
+    (same convention as AFQ_MultiCompCorrection for alphaFWE / clusterFWE):
 
     - alphaFWE: alpha-quantile of the min p-value over the points;
     - clusterFWE: (1 - alpha)-quantile of the longest run of points with p < alpha,
       plus one, i.e. the minimum length of a significant run (strictly longer than
-      the null quantile, valid despite the ties of the discrete run lengths).
+      the null quantile, valid despite the ties of the discrete run lengths);
+    - TFCE: null distribution of max |TFCE|.
+
+    `starts` (stacked multi-tract profiles) marks the first point of each bundle /
+    centroid: runs and TFCE clusters are cut there, as they are in the per-bundle
+    observed profiles.
     """
     nperm = settings.nperm
+    if nperm < 1:
+        return FWEThresholds()
     p_min = np.full(nperm, np.nan)
     cluster_max = np.zeros(nperm)
-    for i in range(nperm):
-        p = permuted_pvalues(rng)
-        if np.isfinite(p).any():
-            p_min[i] = np.nanmin(p)
-        cluster_max[i] = max((end - start for start, end in _true_runs(p < settings.alpha)),
-                             default=0)
-    k = min(int(round(settings.alpha * nperm)), nperm - 1)
-    return float(np.sort(p_min)[k]), float(np.sort(cluster_max)[::-1][k]) + 1
-
-
-def fwe_thresholds(test: PointwiseTest, kind: str, n_groups: int, settings: Settings,
-                   rng: np.random.Generator) -> Tuple[float, float]:
-    """(alphaFWE, clusterFWE): Freedman-Lane permutations of the test for the GLM,
-    else AFQ_MultiCompCorrection on the metric and variable with the confounds
-    regressed out (one-way ANOVA with more than 2 groups, not handled by AFQ)."""
-    if settings.nperm < 1:
-        return np.nan, np.nan
-    if test.permuted_pvalues is not None:
-        return _permutation_thresholds(test.permuted_pvalues, settings, rng)
-    if kind == "group" and n_groups > 2:
-        Y, codes = test.afq_data, test.afq_y
-        return _permutation_thresholds(
-            lambda rng: _group_test(Y, rng.permutation(codes), n_groups).pvalue, settings, rng)
+    tfce_max = np.zeros(nperm)
     with warnings.catch_warnings(), np.errstate(all="ignore"):
-        warnings.simplefilter("ignore")
-        alpha_fwe, _, cluster_fwe, _ = AFQ_MultiCompCorrection(
-            test.afq_data, test.afq_y, settings.alpha, nperm=settings.nperm, rng=rng)
-    return float(alpha_fwe), float(cluster_fwe)
-
-
-def significance_mask(p: np.ndarray, alpha_fwe: float, cluster_fwe: float,
-                      method: str, alpha: float) -> np.ndarray:
-    """
-    Significant points according to the FWE method:
-
-    - alphaFWE: p < alphaFWE;
-    - clusterFWE: runs of p < alpha at least clusterFWE points long;
-    - mixed: such runs that also contain a point with p < alphaFWE.
-    """
-    p = np.asarray(p, dtype=float)
-    sig = np.zeros(len(p), dtype=bool)
-    if method == "alphaFWE":
-        return p < alpha_fwe if np.isfinite(alpha_fwe) else sig
-    if not np.isfinite(cluster_fwe) or (method == "mixed" and not np.isfinite(alpha_fwe)):
-        return sig
-    min_size = max(1, int(cluster_fwe))
-    for start, end in _true_runs(p < alpha):
-        if end - start < min_size:
-            continue
-        if method == "mixed" and not np.any(p[start:end] < alpha_fwe):
-            continue
-        sig[start:end] = True
-    return sig
+        warnings.simplefilter("ignore")  # constant profiles -> NaN
+        for i in range(nperm):
+            p, sign = test.permute(rng)
+            if np.isfinite(p).any():
+                p_min[i] = np.nanmin(p)
+            cluster_max[i] = max((end - start for start, end
+                                  in true_runs(p < settings.alpha, starts)), default=0)
+            tfce_max[i] = np.abs(tfce(p, sign, settings, starts)).max(initial=0.0)
+    k = min(int(round(settings.alpha * nperm)), nperm - 1)
+    return FWEThresholds(alpha_fwe=float(np.sort(p_min)[k]),
+                         cluster_fwe=float(np.sort(cluster_max)[::-1][k]) + 1,
+                         tfce_null=np.sort(tfce_max)[::-1])
 
 
 def run_pointwise_analysis(data: UnitData, kind: str, settings: Settings,
-                           thresholds: Optional[Tuple[float, float]], rng_key: str
+                           thresholds: Optional[FWEThresholds], rng_key: str
                            ) -> Optional[Tuple[pd.DataFrame, PointwiseTest]]:
     """
-    Pointwise test + AFQ correction. `thresholds` are (alphaFWE, clusterFWE)
-    computed beforehand (multi-tract), else computed here.
+    Pointwise test + FWE correction. `thresholds` are computed beforehand
+    (multi-tract), else computed here.
 
     Result columns: point, the test statistics (group: p_raw, diff, stat, ...;
-    corr: r, p_raw, n, ...), sig_afq, alphaFWE, clusterFWE, and for groups
+    corr: r, p_raw, n, ...), tfce, p_tfce, sig_<method> for every FWE method,
+    sig_afq (= sig_<FWE_METHOD>), alphaFWE, clusterFWE, tfceFWE, and for groups
     mean_g<i> / n<i> per group.
     """
     test = make_test(data, kind, settings)
     if test is None:
         return None
+    starts = segment_starts(data.points)
     if thresholds is None:
-        thresholds = fwe_thresholds(test, kind, len(data.levels), settings, _rng(settings, rng_key))
-    alpha_fwe, cluster_fwe = thresholds
+        thresholds = fwe_thresholds(test, settings, _rng(settings, rng_key), starts)
 
     res = pd.DataFrame({"point": data.points, **test.stats})
     if kind == "corr":
         res.insert(3, "n", len(data.x))
-    res["sig_afq"] = significance_mask(res["p_raw"], alpha_fwe, cluster_fwe,
-                                       settings.fwe_method, settings.alpha)
-    res["alphaFWE"] = alpha_fwe
-    res["clusterFWE"] = cluster_fwe
+    p = res["p_raw"].to_numpy(dtype=float)
+    res["tfce"] = tfce(p, test.sign, settings, starts)
+    res["p_tfce"] = thresholds.tfce_pvalues(res["tfce"].to_numpy())
+    for method in FWE_METHODS:
+        res[f"sig_{method}"] = (res["p_tfce"].to_numpy() <= settings.alpha if method == "TFCE"
+                                else significance_mask(p, thresholds.alpha_fwe,
+                                                       thresholds.cluster_fwe, method,
+                                                       settings.alpha))
+    res["sig_afq"] = res[f"sig_{settings.fwe_method}"]
+    res["alphaFWE"] = thresholds.alpha_fwe
+    res["clusterFWE"] = thresholds.cluster_fwe
+    res["tfceFWE"] = thresholds.tfce_fwe(settings.alpha)
     if kind == "group":
         for i in range(len(data.levels)):
             group_values = test.values[data.x == i]
@@ -954,7 +1057,7 @@ def group_table(data: UnitData, values: np.ndarray) -> pd.DataFrame:
 
 
 def _shade_clusters(ax, points, sig):
-    for start, end in _true_runs(sig):
+    for start, end in true_runs(sig):
         ax.axvspan(points[start], points[end - 1], color="red", alpha=0.18, linewidth=0)
 
 
@@ -972,6 +1075,10 @@ def _plot_pvalues(ax, res: pd.DataFrame, settings: Settings):
         ax2.text(0.01, 0.95, f"clusterFWE>={int(cluster_fwe)} (alpha={settings.alpha})",
                  transform=ax2.transAxes, ha="left", va="top", fontsize=8,
                  bbox=dict(boxstyle="round", facecolor="white", alpha=0.6, edgecolor="gray"))
+    if settings.fwe_method == "TFCE":
+        p_tfce = res["p_tfce"].clip(0, 1)
+        ax2.plot(res["point"], p_tfce, color="purple", linewidth=1.2, label="p TFCE (FWE)")
+        ax2.axhline(settings.alpha, color="purple", linestyle=":", linewidth=1.0)
     ax2.set_ylabel("p-value")
     ax2.set_ylim(0, ymax)
     return ax2
@@ -1084,19 +1191,18 @@ def prepare_profiles(df_unit: pd.DataFrame, metric_col: str, var: str,
 
 
 def analyse_bundle(bundle_name: str, df: pd.DataFrame, metric_set: List[str], settings: Settings,
-                   report_dir: str, thresholds: Dict[Tuple[str, str, str], Tuple[float, float]]
+                   report_dir: str, thresholds: Dict[Tuple[str, str, str], FWEThresholds]
                    ) -> Dict:
     """
     Run every variable x metric x centroid analysis of one bundle, write one
     CSV (and figure) per analysis in <report_dir>/figures and return the
     summary rows and the participants used.
 
-    thresholds: precomputed (alphaFWE, clusterFWE) per (kind, variable, metric)
+    thresholds: precomputed FWE thresholds per (kind, variable, metric)
     when multi-tract correction is on.
     """
     figure_dir = opj(report_dir, "figures")
     os.makedirs(figure_dir, exist_ok=True)
-    sig_key = "alphaFWE" if settings.fwe_method == "alphaFWE" else "clusterFWE"
     rows, included, candidates = [], set(), set()
 
     for kind, var, confounds in settings.variables():
@@ -1105,7 +1211,8 @@ def analyse_bundle(bundle_name: str, df: pd.DataFrame, metric_set: List[str], se
                 profiles = prepare_profiles(df_unit, metric_col, var, settings)
                 if profiles is None:
                     continue
-                data = build_unit_data(profiles.pivot, profiles.meta, var, confounds, kind)
+                data = build_unit_data(profiles.pivot, profiles.meta, var, confounds, kind,
+                                       settings.rank_transform)
                 outcome = None
                 if data is not None:
                     outcome = run_pointwise_analysis(
@@ -1148,17 +1255,20 @@ def analyse_bundle(bundle_name: str, df: pd.DataFrame, metric_set: List[str], se
                     "centroid_id": cid if cid is not None else np.nan,
                     "metric": metric_col,
                     "type": f"{kind}_{var}",
-                    "n_sig": (0 if res.empty
-                              else count_clusters(res["sig_afq"]) if settings.fwe_method == "clusterFWE"
-                              else int(res["sig_afq"].sum())),
+                    "n_sig": 0 if res.empty else n_significant(res["sig_afq"], settings.fwe_method),
+                    **{f"n_sig_{m}": 0 if res.empty else n_significant(res[f"sig_{m}"], m)
+                       for m in FWE_METHODS},
                     "min_p": np.nan if res.empty else float(res["p_raw"].min()),
+                    "min_p_tfce": np.nan if res.empty else float(res["p_tfce"].min()),
                     "max_abs_r": (float(res["r"].abs().max())
                                   if kind == "corr" and not res.empty else np.nan),
                     "removed_points": len(profiles.removed_points),
                     "subjects_used": len(used),
                     "removed_subjects": len(profiles.candidates - used),
                     "confounds_used": ",".join(confounds) if confounds else "none",
-                    sig_key: np.nan if res.empty else float(res[sig_key].iloc[0]),
+                    **{key: np.nan if res.empty else float(res[key].iloc[0])
+                       for key in ("alphaFWE", "clusterFWE", "tfceFWE")},
+                    "fwe_method": settings.fwe_method,
                     "stat_model": settings.stat_model,
                 })
         gc.collect()
@@ -1195,15 +1305,15 @@ def stack_bundles(bundle_data: Dict[str, pd.DataFrame], kind: str, var: str, con
     pivot = pd.concat(pivots, axis=1)
     pivot = pivot.fillna(pivot.mean())
     meta = pd.concat(metas).groupby(level=0).first().reindex(pivot.index)
-    return build_unit_data(pivot, meta, var, confounds, kind)
+    return build_unit_data(pivot, meta, var, confounds, kind, settings.rank_transform)
 
 
 def multi_tract_thresholds(data: UnitData, kind: str, settings: Settings,
-                           rng_key: str) -> Tuple[float, float]:
+                           rng_key: str) -> FWEThresholds:
     test = make_test(data, kind, settings)
     if test is None:
-        return np.nan, np.nan
-    return fwe_thresholds(test, kind, len(data.levels), settings, _rng(settings, rng_key))
+        return FWEThresholds()
+    return fwe_thresholds(test, settings, _rng(settings, rng_key), segment_starts(data.points))
 
 
 # ============================================================================
@@ -1259,9 +1369,12 @@ def generate_report(settings: Settings, csv_files: list, bundle_names: List[str]
     if settings.stat_model == "glm" and settings.correlation_test != "pearson":
         print(f"[NOTE] CORRELATION_TEST='{settings.correlation_test}' is ignored by the GLM model")
     print(f"FWE correction: {settings.fwe_method} (alpha={settings.alpha}, {settings.nperm} permutations)")
+    if settings.fwe_method == "TFCE":
+        print(f"TFCE: E={settings.tfce_e}, H={settings.tfce_h}, dh={settings.tfce_dh}")
     print(f"Multi-tract correction: {'ENABLED' if settings.multi_tract else 'disabled'}")
     print(f"Resampling: {f'{settings.resample_n_points} points' if settings.resample_n_points else 'disabled'}")
     print(f"Stat types: {list(settings.stat_types) or 'all (bare columns)'}")
+    print(f"Rank transform (normal scores): {'ENABLED' if settings.rank_transform else 'disabled'}")
 
     bundle_data, settings = load_bundles(csv_files, bundle_names, settings,
                                          subject_info, keep_only_listed)
@@ -1288,7 +1401,7 @@ def generate_report(settings: Settings, csv_files: list, bundle_names: List[str]
         # Analyses without a stacked dataset get no threshold (nothing significant)
         for kind, var, _ in settings.variables():
             for metric_col in metric_set:
-                thresholds.setdefault((kind, var, metric_col), (np.nan, np.nan))
+                thresholds.setdefault((kind, var, metric_col), FWEThresholds())
 
     jobs = [(name, df, metric_set, settings, report_dir, thresholds)
             for name, df in bundle_data.items()]

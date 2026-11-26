@@ -1,0 +1,196 @@
+# Tests, packages (wheel + sdist + conda) and releases of TractoPL.
+#
+#   git push                      -> tests only (fix / regular commit: nothing is published)
+#   git push origin vX.Y.Z        -> tests + packages + GitHub release vX.Y.Z + prefix.dev upload
+#                                    (packaging/release.sh patch|minor|major does bump + tag + push)
+#   Actions > Release > Run workflow
+#       release = none            -> test packages, downloadable from the run page (no release)
+#       release = patch|minor|major -> bump the version, commit, tag, build and publish the release
+#
+# Tags with a suffix (v1.2.0-rc1) are published as GitHub pre-releases.
+# The conda package is uploaded to https://prefix.dev/<PREFIX_CHANNEL> when the repository
+# variable PREFIX_CHANNEL is set (Settings > Secrets and variables > Actions > Variables).
+# Authentication: trusted publishing (configure this repository and `release.yml` as a
+# trusted publisher of the channel on prefix.dev), or a PREFIX_API_KEY repository secret.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**", "*.png", "examples/**", "apptainer/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release (bumps the version) or only build test packages"
+        type: choice
+        options: [none, patch, minor, major]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PIXI_VERSION: v0.85.0
+
+jobs:
+  # ------------------------------------------------------------------
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          environments: test
+      - name: Version consistency
+        run: python3 packaging/bump_version.py --check
+      - name: Tests
+        run: pixi run -e test test
+
+  # ------------------------------------------------------------------
+  # Decides whether this run publishes a release, and bumps the version when asked.
+  prepare:
+    needs: tests
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the version bump commit and tag
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          BUMP: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          current=$(python3 packaging/bump_version.py --check)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag=${GITHUB_REF#refs/tags/}
+            version=${tag#v}
+            if [[ "${version%%-*}" != "$current" ]]; then
+              echo "::error::Tag $tag does not match TractoPL/_version.py ($current). Use packaging/release.sh."
+              exit 1
+            fi
+            release=true; ref=$tag
+          elif [[ "${BUMP:-none}" != "none" ]]; then
+            version=$(python3 packaging/bump_version.py "$BUMP")
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+              echo "::error::Tag v$version already exists"; exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "Release v$version"
+            git tag -a "v$version" -m "TractoPL $version"
+            git push origin "HEAD:$GITHUB_REF_NAME" "v$version"
+            release=true; ref="v$version"
+          else
+            version="$current-dev.${GITHUB_SHA::7}"
+            release=false; ref=$GITHUB_SHA
+          fi
+          prerelease=false; [[ "$version" == *-* ]] && prerelease=true
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "### TractoPL $version (release: $release)" >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          environments: build
+
+      - name: Wheel and sdist
+        run: |
+          pixi run -e build python -m build --outdir dist .
+          pixi run -e build python -m pip install --no-deps --target /tmp/smoke dist/*.whl
+          PYTHONPATH=/tmp/smoke pixi run -e build python -c "import TractoPL; print(TractoPL.__version__)"
+
+      - name: Conda package (pixi-build, noarch)
+        run: pixi publish --target-dir dist/conda
+
+      - name: List packages
+        run: ls -l dist dist/conda
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TractoPL-${{ needs.prepare.outputs.version }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/conda/*.conda
+          if-no-files-found: error
+          retention-days: ${{ needs.prepare.outputs.release == 'true' && 5 || 14 }}
+
+  # ------------------------------------------------------------------
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.ref }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          files=$(find dist -type f \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.conda' \))
+          sha256sum $files | sed 's#dist/\(conda/\)\?##' > SHA256SUMS.txt
+          flags=(--generate-notes --title "TractoPL ${TAG#v}")
+          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" $files SHA256SUMS.txt
+
+  # ------------------------------------------------------------------
+  prefix-dev:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release == 'true' && vars.PREFIX_CHANNEL != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # trusted publishing on prefix.dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          run-install: false
+      - name: Build and upload the conda package
+        env:
+          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
+          CHANNEL: ${{ vars.PREFIX_CHANNEL }}
+        run: |
+          set -euo pipefail
+          # API key if the secret exists, otherwise OIDC trusted publishing
+          if [[ -n "$PREFIX_API_KEY" ]]; then
+            pixi auth login --token "$PREFIX_API_KEY" https://prefix.dev
+          else
+            unset PREFIX_API_KEY
+          fi
+          pixi publish --target-channel "https://prefix.dev/$CHANNEL"
+          echo "Published to https://prefix.dev/channels/$CHANNEL" >> "$GITHUB_STEP_SUMMARY"
