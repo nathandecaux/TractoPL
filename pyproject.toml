@@ -109,6 +109,7 @@ tqdm = "*"
 vtk-base = "*"
 
 [tool.pixi.pypi-dependencies]
+antspyx = "*"   # from PyPI: conda-forge only builds it for linux-64 and osx-64
 TractoPL = { path = ".", editable = true }
 
 # antspyx: conda-forge builds it for linux-64 and osx-64 only -> PyPI wheel on osx-arm64
