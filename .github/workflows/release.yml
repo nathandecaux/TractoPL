@@ -191,6 +191,14 @@ jobs:
             pixi auth login --token "$PREFIX_API_KEY" https://prefix.dev
           else
             unset PREFIX_API_KEY
+            if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+              echo "::error::No OIDC token available to this job (id-token: write not granted) and no PREFIX_API_KEY secret."
+              exit 1
+            fi
+            # Print the (non-secret) claims prefix.dev matches against the trusted publisher
+            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=prefix.dev" \
+              | python3 -c 'import sys,json,base64; t=json.load(sys.stdin)["value"].split(".")[1]; c=json.loads(base64.urlsafe_b64decode(t+"="*(-len(t)%4))); [print(f"OIDC {k}: {c.get(k)}") for k in ("repository","repository_owner","workflow_ref","job_workflow_ref","ref","environment","event_name")]'
           fi
-          pixi publish --target-channel "https://prefix.dev/$CHANNEL"
+          pixi publish -vv --target-channel "https://prefix.dev/$CHANNEL"
           echo "Published to https://prefix.dev/channels/$CHANNEL" >> "$GITHUB_STEP_SUMMARY"
