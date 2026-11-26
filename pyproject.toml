@@ -159,7 +159,7 @@ wheel = "python -m build --outdir dist ."
 # Conda package (noarch python), built with `pixi publish`.
 [tool.pixi.package]
 name = "tractopl"
-version = "0.1.2"  # kept in sync with TractoPL/_version.py by packaging/bump_version.py
+version = "0.1.3"  # kept in sync with TractoPL/_version.py by packaging/bump_version.py
 
 [tool.pixi.package.build.backend]
 name = "pixi-build-python"
