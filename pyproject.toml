@@ -86,22 +86,22 @@ testpaths = ["tests"]
 [tool.pixi.workspace]
 name = "TractoPL"
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-64", "osx-arm64"]
+# antspyx wheels for osx-arm64 need macOS >= 14
+platforms = ["linux-64", "osx-64", { name = "osx-arm64-macos14", subdir = "osx-arm64", macos = "14.0" }]
 preview = ["pixi-build"]
 
 [tool.pixi.dependencies]
 python = ">=3.10,<3.14"
-antspyx = "*"
 click = "*"
 dipy = "*"
 joblib = "*"
 matplotlib-base = "*"
 nibabel = "*"
-numpy = "*"
+numpy = "<2.4"    # antspyx 0.6.3 requires numpy<2.4
 pandas = "*"
 pydicom = "*"
 scikit-learn = "*"
-scipy = "*"
+scipy = "<1.16"   # antspyx 0.6.3 requires scipy<1.16
 shapely = "*"
 simpleitk = "*"
 statsmodels = "*"
@@ -110,6 +110,16 @@ vtk-base = "*"
 
 [tool.pixi.pypi-dependencies]
 TractoPL = { path = ".", editable = true }
+
+# antspyx: conda-forge builds it for linux-64 and osx-64 only -> PyPI wheel on osx-arm64
+[tool.pixi.target.linux-64.dependencies]
+antspyx = ">=0.6.3"
+
+[tool.pixi.target.osx-64.dependencies]
+antspyx = ">=0.6.3"
+
+[tool.pixi.target.osx-arm64.pypi-dependencies]
+antspyx = ">=0.6.3"
 
 [tool.pixi.feature.dashboard.dependencies]
 plotly = "*"
@@ -125,14 +135,20 @@ pytest = "*"
 python-build = "*"
 pip = "*"
 
+[tool.pixi.feature.release.dependencies]
+python = ">=3.10"
+
 [tool.pixi.environments]
 default = { features = ["dashboard"], solve-group = "default" }
 test = { features = ["dashboard", "test"], solve-group = "default" }
 build = { features = ["build"], no-default-feature = true }
+release = { features = ["release"], no-default-feature = true }
 
 [tool.pixi.tasks]
 test = "python -m pytest -q tests"
 gui = "tractopl-gui"
+
+[tool.pixi.feature.release.tasks]
 version = "python packaging/bump_version.py"
 release = "bash packaging/release.sh"
 
@@ -156,7 +172,7 @@ pip = "*"
 
 [tool.pixi.package.run-dependencies]
 python = ">=3.10"
-antspyx = "*"
+antspyx = "*"   # conda-forge: linux-64 and osx-64 only (on osx-arm64, use pip or the pixi workspace)
 click = "*"
 dipy = "*"
 joblib = "*"

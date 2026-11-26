@@ -32,6 +32,10 @@ conda install -c https://repo.prefix.dev/tractopl -c conda-forge tractopl
 
 The web applications need `streamlit plotly panel hvplot bokeh` in addition.
 
+The conda package installs on Linux x86_64 and Intel macOS only: its dependency `antspyx` is not
+built by conda-forge for Apple Silicon. On Apple Silicon, use the pixi workspace (it takes
+`antspyx` from PyPI, macOS ≥ 14) or pip.
+
 ## pip
 
 ```shell
