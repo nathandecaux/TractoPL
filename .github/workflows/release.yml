@@ -192,4 +192,4 @@ jobs:
         run: |
           set -euo pipefail
           pixi publish --target-channel "https://prefix.dev/$CHANNEL"
-          echo "Published to https://prefix.dev/channels/$CHANNEL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published to https://prefix.dev/channels/@$CHANNEL" >> "$GITHUB_STEP_SUMMARY"

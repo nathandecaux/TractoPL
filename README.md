@@ -21,7 +21,7 @@ find its inputs and name its outputs. The supported workflow is:
 | Method | Command | Use |
 |---|---|---|
 | **pixi** (recommended) | `git clone https://github.com/nathandecaux/TractoPL.git && cd TractoPL && pixi install` | full environment with the web applications, reproducible (`pixi.lock`) |
-| **conda / pixi package** | `pixi add --channel https://prefix.dev/tractopl tractopl` | add TractoPL to another pixi or conda environment |
+| **conda / pixi package** | `pixi add --channel https://prefix.dev/nathandecaux/tractopl tractopl` | add TractoPL to another pixi or conda environment |
 | **pip** | `pip install "TractoPL[dashboard] @ git+https://github.com/nathandecaux/TractoPL.git"` | existing Python environment |
 | **Apptainer** | `apptainer build --fakeroot tractopl.sif apptainer/TractoPL.def` | all external tools (Anima, MRtrix3, ANTs) included |
 
